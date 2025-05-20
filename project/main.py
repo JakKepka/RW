@@ -14,9 +14,77 @@ from PyQt5.QtWidgets import (
     QStyleFactory,
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QPalette, QColor
+from PyQt5.QtGui import (
+    QFont,
+    QPalette,
+    QColor,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QTextCursor,
+)
 from engine.semantics import ActionSemantics
 from engine.executor import State
+import re
+
+class SyntaxHighlighter(QSyntaxHighlighter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Color palette for syntax only
+        self.colors = {
+            'keywords': '#5F0F40',    # bordowy - dla słów kluczowych
+            'agents': '#9A031E',      # czerwony - dla agentów
+            'fluents': '#CB793A',     # pomarańczowy - dla fluentów
+            'conditions': '#FCDC4D'    # żółty - dla warunków
+        }
+        
+        # Keyword patterns
+        self.highlighting_rules = []
+        
+        # Keywords format (causes, impossible, always, if)
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor(self.colors['keywords']))
+        keyword_format.setFontWeight(QFont.Bold)
+        keywords = ['causes', 'impossible', 'always', 'if', 'by', 'in', 'from']
+        for word in keywords:
+            pattern = f'\\b{word}\\b'
+            self.highlighting_rules.append((re.compile(pattern), keyword_format))
+        
+        # Agents and actions format (inside parentheses)
+        agent_format = QTextCharFormat()
+        agent_format.setForeground(QColor(self.colors['agents']))
+        self.highlighting_rules.append((re.compile(r'\([^)]+\)'), agent_format))
+        
+        # Fluents and effects format (words after causes/impossible)
+        fluent_format = QTextCharFormat()
+        fluent_format.setForeground(QColor(self.colors['fluents']))
+        self.highlighting_rules.append((
+            re.compile(r'(?<=causes\s)(\w+(?:\([^)]*\))?)\s+(\w+)'),
+            fluent_format
+        ))
+        
+        # Conditions format (after if)
+        condition_format = QTextCharFormat()
+        condition_format.setForeground(QColor(self.colors['conditions']))
+        self.highlighting_rules.append((
+            re.compile(r'(?<=if\s)(.+)$', re.MULTILINE),
+            condition_format
+        ))
+
+    def highlightBlock(self, text):
+        for pattern, format in self.highlighting_rules:
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class SyntaxTextEdit(QTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.highlighter = SyntaxHighlighter(self.document())
+        
+        # Set font
+        font = QFont('Menlo', 13)
+        font.setFixedPitch(True)
+        self.setFont(font)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -62,7 +130,7 @@ class MainWindow(QMainWindow):
         # Domain Editor Tab
         domain_tab = QWidget()
         domain_layout = QVBoxLayout(domain_tab)
-        self.domain_editor = QTextEdit()
+        self.domain_editor = SyntaxTextEdit()
         
         # Add Apply Domain button
         apply_domain_btn = QPushButton("Apply Domain Definition")
@@ -75,7 +143,7 @@ class MainWindow(QMainWindow):
         # Query Tab
         query_tab = QWidget()
         query_layout = QVBoxLayout(query_tab)
-        self.query_editor = QTextEdit()
+        self.query_editor = SyntaxTextEdit()
         self.query_result = QTextEdit()
         self.query_result.setReadOnly(True)
         
