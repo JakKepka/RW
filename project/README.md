@@ -1,6 +1,4 @@
-# RW
-
-## Multi-Agent Action Programs Analysis System
+# Multi-Agent Action Programs Analysis System
 
 A desktop application for designing and analyzing action programs in multi-agent systems, built with Python and PyQt5.
 
