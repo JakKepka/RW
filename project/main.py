@@ -15,12 +15,17 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QPalette, QColor
+from engine.semantics import ActionSemantics
+from engine.executor import State
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Multi-Agent Action Programs Analysis System")
         self.setMinimumSize(1200, 800)
+        
+        # Initialize semantics engine
+        self.semantics = ActionSemantics()
         
         # Set the application style for dark mode
         self.setup_dark_mode()
@@ -44,6 +49,7 @@ class MainWindow(QMainWindow):
             "Fire Brigade",
             "Medical Diagnosis"
         ])
+        self.problem_combo.currentTextChanged.connect(self.load_problem)
         
         # Add components to left panel
         left_layout.addWidget(problem_label)
@@ -57,8 +63,14 @@ class MainWindow(QMainWindow):
         domain_tab = QWidget()
         domain_layout = QVBoxLayout(domain_tab)
         self.domain_editor = QTextEdit()
+        
+        # Add Apply Domain button
+        apply_domain_btn = QPushButton("Apply Domain Definition")
+        apply_domain_btn.clicked.connect(self.apply_domain)
+        
         domain_layout.addWidget(QLabel("Domain Definition:"))
         domain_layout.addWidget(self.domain_editor)
+        domain_layout.addWidget(apply_domain_btn)
         
         # Query Tab
         query_tab = QWidget()
@@ -66,8 +78,14 @@ class MainWindow(QMainWindow):
         self.query_editor = QTextEdit()
         self.query_result = QTextEdit()
         self.query_result.setReadOnly(True)
+        
+        # Add Execute Query button
+        execute_query_btn = QPushButton("Execute Query")
+        execute_query_btn.clicked.connect(self.execute_query)
+        
         query_layout.addWidget(QLabel("Query:"))
         query_layout.addWidget(self.query_editor)
+        query_layout.addWidget(execute_query_btn)
         query_layout.addWidget(QLabel("Result:"))
         query_layout.addWidget(self.query_result)
         
@@ -81,7 +99,58 @@ class MainWindow(QMainWindow):
         
         # Create menu bar
         self.create_menu_bar()
-
+        
+        # Load initial problem
+        self.load_problem(self.problem_combo.currentText())
+    
+    def apply_domain(self):
+        """Apply the domain definition"""
+        try:
+            domain_text = self.domain_editor.toPlainText()
+            print("Applying domain definition:")
+            print(domain_text)
+            self.semantics.process_domain_definition(domain_text)
+            QMessageBox.information(self, "Success", "Domain definition applied successfully!")
+        except Exception as e:
+            print(f"Error in domain definition: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error in domain definition: {str(e)}")
+    
+    def execute_query(self):
+        """Execute the current query"""
+        try:
+            query_text = self.query_editor.toPlainText()
+            print("Executing query:")
+            print(query_text)
+            result, explanation = self.semantics.process_query(query_text)
+            print(f"Query result: {result}")
+            print(f"Explanation: {explanation}")
+            self.query_result.setText(f"Result: {'True' if result else 'False'}\nExplanation: {explanation}")
+        except Exception as e:
+            print(f"Error in query: {str(e)}")
+            self.query_result.setText(f"Error: {str(e)}")
+    
+    def load_problem(self, problem_name):
+        """Load a problem from the database"""
+        try:
+            from db.database import DatabaseManager
+            db = DatabaseManager()
+            problem = db.get_problem_by_name(problem_name)
+            if problem:
+                print(f"Loading problem: {problem_name}")
+                print("Domain definition:")
+                print(problem['domain_definition'])
+                print("Example queries:")
+                print(problem['example_queries'])
+                self.domain_editor.setText(problem['domain_definition'])
+                self.query_editor.setText(problem['example_queries'])
+                # Automatically apply the domain definition
+                self.apply_domain()
+            else:
+                print(f"Problem not found: {problem_name}")
+        except Exception as e:
+            print(f"Error loading problem: {str(e)}")
+            QMessageBox.warning(self, "Warning", f"Could not load problem: {str(e)}")
+    
     def setup_dark_mode(self):
         """Set up dark mode styling"""
         # Set fusion style for better dark mode support

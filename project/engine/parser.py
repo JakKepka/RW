@@ -10,6 +10,8 @@ from pyparsing import (
     Forward,
     ZeroOrMore,
     ParseException,
+    White,
+    restOfLine,
 )
 
 class ActionParser:
@@ -103,6 +105,50 @@ class ActionParser:
         
         # Complete program
         self.program = OneOrMore(self.statement)
+        
+        # Action sequence for queries
+        self.action_sequence = delimitedList(self.basic_action, ";")("actions")
+        
+        # Query types
+        self.executable_query = (
+            Literal("always") + 
+            Literal("executable") + 
+            self.action_sequence
+        )("executable")
+        
+        self.accessible_query = (
+            Literal("sometimes") + 
+            Literal("accessible") + 
+            self.effect("goal") + 
+            Literal("from") + 
+            self.effect("initial") + 
+            Literal("in") + 
+            self.action_sequence
+        )("accessible")
+        
+        self.realisable_query = (
+            Literal("realisable") + 
+            self.action_sequence + 
+            Literal("by") + 
+            delimitedList(self.agent)("agents")
+        )("realisable")
+        
+        self.active_query = (
+            Literal("active") + 
+            self.agent("agent") + 
+            Literal("in") + 
+            self.action("action") + 
+            Literal("by") + 
+            delimitedList(self.agent)("agents")
+        )("active")
+        
+        # Complete query
+        self.query = (
+            self.executable_query |
+            self.accessible_query |
+            self.realisable_query |
+            self.active_query
+        )
     
     def parse_action(self, text):
         """Parse an action expression"""
@@ -127,47 +173,15 @@ class ActionParser:
     
     def parse_query(self, text):
         """Parse a query expression"""
-        # Query types
-        executable = (
-            Literal("always").suppress() +
-            Literal("executable").suppress() +
-            self.action_expr("program")
-        )
-        
-        accessible = (
-            Literal("sometimes").suppress() +
-            Literal("accessible").suppress() +
-            self.effect("goal") +
-            Literal("from").suppress() +
-            self.effect("initial") +
-            Literal("in").suppress() +
-            self.action_expr("program")
-        )
-        
-        realisable = (
-            Literal("realisable").suppress() +
-            self.action_expr("program") +
-            Literal("by").suppress() +
-            Group(delimitedList(self.agent))("group")
-        )
-        
-        active = (
-            Literal("active").suppress() +
-            self.agent("agent") +
-            Literal("in").suppress() +
-            self.action("action") +
-            Literal("by").suppress() +
-            Group(delimitedList(self.agent))("group")
-        )
-        
-        query = (
-            executable |
-            accessible |
-            realisable |
-            active
-        )
-        
         try:
-            return query.parseString(text, parseAll=True)
+            print(f"Parsing query: {text}")
+            result = self.query.parseString(text, parseAll=True)
+            print(f"Query parsed successfully: {result.dump()}")
+            return result
         except ParseException as e:
-            raise ValueError(f"Invalid query syntax: {str(e)}") 
+            print(f"Parse error at line {e.lineno}, column {e.column}")
+            print(f"Error message: {str(e)}")
+            raise ValueError(f"Invalid query syntax: {str(e)}")
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")
+            raise ValueError(f"Error parsing query: {str(e)}") 
