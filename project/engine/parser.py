@@ -59,8 +59,8 @@ class ActionParser:
         # Effect expressions
         self.effect = Forward()
         self.effect << (
-            self.fluent |
-            Literal("not").suppress() + self.fluent
+            Literal("not").suppress() + self.fluent |
+            self.fluent
         )
         
         # Causes statement
@@ -111,13 +111,13 @@ class ActionParser:
         
         # Query types
         self.executable_query = (
-            Literal("always") + 
+            Optional(Literal("always")) + 
             Literal("executable") + 
             self.action_sequence
         )("executable")
         
         self.accessible_query = (
-            Literal("sometimes") + 
+            Optional(Literal("sometimes")) + 
             Literal("accessible") + 
             self.effect("goal") + 
             Literal("from") + 

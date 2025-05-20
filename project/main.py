@@ -128,14 +128,26 @@ class GraphNode(QGraphicsItem):
             self.width = 100
             self.height = 40
             self.color = QColor("#9A031E")  # czerwony
+        elif node_type == "impossible_action":
+            self.width = 100
+            self.height = 40
+            self.color = QColor("#FF0000")  # jaskrawy czerwony dla zanegowanych akcji
         elif node_type == "effect":
             self.width = 80
             self.height = 80
             self.color = QColor("#CB793A")  # pomarańczowy
+        elif node_type == "impossible_effect":
+            self.width = 80
+            self.height = 80
+            self.color = QColor("#FF4500")  # jaskrawy pomarańczowy dla zanegowanych efektów
         elif node_type == "condition":
             self.width = 120
             self.height = 40
             self.color = QColor("#FCDC4D")  # żółty
+        elif node_type == "impossible_condition":
+            self.width = 120
+            self.height = 40
+            self.color = QColor("#FFD700")  # jaskrawy żółty dla zanegowanych warunków
         
         self.edges = []
     
@@ -144,13 +156,19 @@ class GraphNode(QGraphicsItem):
     
     def paint(self, painter, option, widget):
         # Set thicker border (4 pixels)
-        painter.setPen(QPen(self.color, 4))
+        pen = QPen(self.color, 4)
         
-        if self.node_type == "action":
+        # Use dashed line for impossible (negated) nodes
+        if self.node_type.startswith("impossible_"):
+            pen.setStyle(Qt.DashLine)
+        
+        painter.setPen(pen)
+        
+        if self.node_type in ["action", "impossible_action"]:
             painter.drawRect(self.boundingRect())
-        elif self.node_type == "effect":
+        elif self.node_type in ["effect", "impossible_effect"]:
             painter.drawEllipse(self.boundingRect())
-        elif self.node_type == "condition":
+        elif self.node_type in ["condition", "impossible_condition"]:
             painter.drawPolygon([
                 QPointF(-self.width/2, 0),
                 QPointF(0, -self.height/2),
@@ -158,9 +176,10 @@ class GraphNode(QGraphicsItem):
                 QPointF(0, self.height/2),
             ])
         
-        # Draw text
+        # Draw text with "not" prefix for impossible nodes
         painter.setPen(QPen(Qt.black))  # Reset pen for text
-        painter.drawText(self.boundingRect(), Qt.AlignCenter, self.text)
+        text_to_display = "not " + self.text if self.node_type.startswith("impossible_") else self.text
+        painter.drawText(self.boundingRect(), Qt.AlignCenter, text_to_display)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:
@@ -588,36 +607,70 @@ class MainWindow(QMainWindow):
                 continue
             
             parts = line.split()
-            if parts[0] == "causes":
-                action_name = parts[1]
-                effect_name = parts[2]
+            if not parts:
+                continue
                 
-                # Create nodes if they don't exist
+            if parts[0] == "causes" or parts[0] == "impossible":
+                # Get action name (parts[1])
+                action_name = parts[1]
+                action_type = "action" if parts[0] == "causes" else "impossible_action"
+                
+                # Create action node if it doesn't exist
                 if action_name not in nodes:
-                    action_node = GraphNode(action_name, "action")
+                    action_node = GraphNode(action_name, action_type)
                     scene.addItem(action_node)
                     nodes[action_name] = action_node
                 
-                if effect_name not in nodes:
-                    effect_node = GraphNode(effect_name, "effect")
-                    scene.addItem(effect_node)
-                    nodes[effect_name] = effect_node
-                
-                # Create edge
-                edge = GraphEdge(nodes[action_name], nodes[effect_name], "causes")
-                scene.addItem(edge)
+                if parts[0] == "causes":
+                    # Get effect
+                    effect_index = 2
+                    effect_name = parts[effect_index]
+                    effect_type = "effect"
+                    
+                    # Check if the effect is negated (either as "not effect" or "neg_effect")
+                    if effect_index + 1 < len(parts) and parts[effect_index] == "not":
+                        effect_name = parts[effect_index + 1]
+                        effect_type = "impossible_effect"
+                    elif effect_name.startswith("neg_"):
+                        effect_name = effect_name[4:]  # Remove "neg_" prefix
+                        effect_type = "impossible_effect"
+                    
+                    if effect_name not in nodes:
+                        effect_node = GraphNode(effect_name, effect_type)
+                        scene.addItem(effect_node)
+                        nodes[effect_name] = effect_node
+                    
+                    # Create edge
+                    edge = GraphEdge(nodes[action_name], nodes[effect_name], "causes")
+                    scene.addItem(edge)
                 
                 # Add conditions if they exist
                 if "if" in line:
-                    conditions = line.split("if")[1].strip().split(",")
+                    conditions_part = line[line.index("if") + 2:].strip()
+                    conditions = [c.strip() for c in conditions_part.split(",")]
+                    
                     for condition in conditions:
-                        condition = condition.strip()
-                        if condition not in nodes:
-                            condition_node = GraphNode(condition, "condition")
-                            scene.addItem(condition_node)
-                            nodes[condition] = condition_node
+                        condition_type = "condition"
+                        condition_name = condition
                         
-                        edge = GraphEdge(nodes[effect_name], nodes[condition], "requires")
+                        # Check if condition is negated (either as "not condition" or "neg_condition")
+                        if condition.startswith("not "):
+                            condition_name = condition[4:]
+                            condition_type = "impossible_condition"
+                        elif condition.startswith("neg_"):
+                            condition_name = condition[4:]
+                            condition_type = "impossible_condition"
+                        
+                        if condition_name not in nodes:
+                            condition_node = GraphNode(condition_name, condition_type)
+                            scene.addItem(condition_node)
+                            nodes[condition_name] = condition_node
+                        
+                        # Connect condition to action or effect based on statement type
+                        if parts[0] == "causes":
+                            edge = GraphEdge(nodes[effect_name], nodes[condition_name], "requires")
+                        else:  # impossible
+                            edge = GraphEdge(nodes[action_name], nodes[condition_name], "requires")
                         scene.addItem(edge)
         
         # Arrange nodes in a grid
@@ -654,72 +707,165 @@ class MainWindow(QMainWindow):
             if not line.strip():
                 continue
             
-            parts = line.split()
-            if not parts:
-                continue
+            # Tokenize the line while preserving parentheses content
+            tokens = []
+            current_token = []
+            in_parentheses = False
+            
+            words = line.split()
+            i = 0
+            while i < len(words):
+                word = words[i]
                 
+                # Handle 'not' token
+                if word == 'not':
+                    # Look ahead to next token
+                    if i + 1 < len(words):
+                        next_word = words[i + 1]
+                        # If next token starts with '(', collect everything until matching ')'
+                        if '(' in next_word:
+                            paren_count = next_word.count('(')
+                            content = [next_word]
+                            i += 1
+                            while i + 1 < len(words) and paren_count > 0:
+                                i += 1
+                                curr = words[i]
+                                content.append(curr)
+                                paren_count += curr.count('(')
+                                paren_count -= curr.count(')')
+                            tokens.append('not ' + ' '.join(content))
+                        else:
+                            # Just combine 'not' with next token
+                            tokens.append('not ' + next_word)
+                            i += 1
+                    i += 1
+                    continue
+                
+                # Handle regular tokens
+                if '(' in word:
+                    paren_count = word.count('(')
+                    content = [word]
+                    while i + 1 < len(words) and paren_count > 0:
+                        i += 1
+                        curr = words[i]
+                        content.append(curr)
+                        paren_count += curr.count('(')
+                        paren_count -= curr.count(')')
+                    tokens.append(' '.join(content))
+                else:
+                    tokens.append(word)
+                i += 1
+            
+            if not tokens:
+                continue
+            
             # Handle different query types
-            if parts[0] == "executable":
+            if tokens[0] == "executable":
                 # Create nodes for each action in the program
                 prev_node = None
-                for action in parts[1:]:
-                    if action not in nodes:
-                        node = GraphNode(action, "action")
+                for token in tokens[1:]:
+                    node_text = token
+                    node_type = "action"
+                    
+                    # Handle negated actions
+                    if token.startswith('not '):
+                        node_text = token[4:]  # Remove 'not ' prefix
+                        node_type = "impossible_action"
+                    
+                    if node_text not in nodes:
+                        node = GraphNode(node_text, node_type)
                         scene.addItem(node)
-                        nodes[action] = node
+                        nodes[node_text] = node
                     
                     # Connect sequential actions
                     if prev_node:
-                        edge = GraphEdge(prev_node, nodes[action], "next")
+                        edge = GraphEdge(prev_node, nodes[node_text], "next")
                         scene.addItem(edge)
-                    prev_node = nodes[action]
+                    prev_node = nodes[node_text]
                     
-            elif parts[0] == "accessible":
+            elif tokens[0] == "accessible":
                 # Create nodes for actions and goal state
-                goal = parts[-1]
-                goal_node = GraphNode(goal, "effect")
+                goal = tokens[-1]
+                goal_text = goal
+                goal_type = "effect"
+                
+                # Handle negated goal
+                if goal.startswith('not '):
+                    goal_text = goal[4:]  # Remove 'not ' prefix
+                    goal_type = "impossible_effect"
+                
+                goal_node = GraphNode(goal_text, goal_type)
                 scene.addItem(goal_node)
-                nodes[goal] = goal_node
+                nodes[goal_text] = goal_node
                 
                 # Add action nodes
-                for action in parts[1:-1]:
-                    if action not in nodes:
-                        node = GraphNode(action, "action")
+                for token in tokens[1:-1]:
+                    node_text = token
+                    node_type = "action"
+                    
+                    # Handle negated actions
+                    if token.startswith('not '):
+                        node_text = token[4:]  # Remove 'not ' prefix
+                        node_type = "impossible_action"
+                    
+                    if node_text not in nodes:
+                        node = GraphNode(node_text, node_type)
                         scene.addItem(node)
-                        nodes[action] = node
+                        nodes[node_text] = node
                         # Connect action to goal
                         edge = GraphEdge(node, goal_node, "leads to")
                         scene.addItem(edge)
                         
-            elif parts[0] == "realisable":
-                # Create nodes for actions and agents
-                group_idx = parts.index("by")
-                actions = parts[1:group_idx]
-                agents = parts[group_idx+1:]
+            elif tokens[0] == "realisable":
+                # Find 'by' index
+                try:
+                    group_idx = tokens.index("by")
+                except ValueError:
+                    continue
+                    
+                actions = tokens[1:group_idx]
+                agents = tokens[group_idx+1:]
                 
                 # Add action nodes
                 prev_node = None
-                for action in actions:
-                    if action not in nodes:
-                        node = GraphNode(action, "action")
+                for token in actions:
+                    node_text = token
+                    node_type = "action"
+                    
+                    # Handle negated actions
+                    if token.startswith('not '):
+                        node_text = token[4:]  # Remove 'not ' prefix
+                        node_type = "impossible_action"
+                    
+                    if node_text not in nodes:
+                        node = GraphNode(node_text, node_type)
                         scene.addItem(node)
-                        nodes[action] = node
+                        nodes[node_text] = node
                     
                     # Connect sequential actions
                     if prev_node:
-                        edge = GraphEdge(prev_node, nodes[action], "next")
+                        edge = GraphEdge(prev_node, nodes[node_text], "next")
                         scene.addItem(edge)
-                    prev_node = nodes[action]
+                    prev_node = nodes[node_text]
                 
                 # Add agent nodes
-                for agent in agents:
-                    if agent not in nodes:
-                        node = GraphNode(agent, "condition")
+                for token in agents:
+                    node_text = token
+                    node_type = "condition"
+                    
+                    # Handle negated agents
+                    if token.startswith('not '):
+                        node_text = token[4:]  # Remove 'not ' prefix
+                        node_type = "impossible_condition"
+                    
+                    if node_text not in nodes:
+                        node = GraphNode(node_text, node_type)
                         scene.addItem(node)
-                        nodes[agent] = node
+                        nodes[node_text] = node
                         # Connect agent to all actions
                         for action in actions:
-                            edge = GraphEdge(nodes[agent], nodes[action], "can perform")
+                            action_text = action[4:] if action.startswith('not ') else action
+                            edge = GraphEdge(nodes[node_text], nodes[action_text], "can perform")
                             scene.addItem(edge)
         
         # Arrange nodes in a grid
@@ -761,12 +907,146 @@ class MainWindow(QMainWindow):
             domain_text = self.domain_editor.toPlainText()
             print("Applying domain definition:")
             print(domain_text)
-            self.semantics.process_domain_definition(domain_text)
+            
+            # Pre-process domain text to handle negated effects and conditions
+            processed_lines = []
+            for line in domain_text.split('\n'):
+                if not line.strip():
+                    continue
+                    
+                parts = line.split()
+                if not parts:
+                    continue
+                
+                if parts[0] == "causes":
+                    # Find the effect part (after action, before possible 'if')
+                    action_end = 2  # After "causes action"
+                    if_pos = len(parts)  # Default to end of line
+                    for i, part in enumerate(parts):
+                        if part == "if":
+                            if_pos = i
+                            break
+                    
+                    # Check for negated effect
+                    effect_parts = parts[action_end:if_pos]
+                    if len(effect_parts) >= 2 and effect_parts[0] == "not":
+                        # Convert "not effect" to "neg_effect"
+                        new_effect = "neg_" + effect_parts[1]
+                        # Reconstruct the line
+                        new_line = parts[:action_end]  # "causes action"
+                        new_line.append(new_effect)    # "neg_effect"
+                        if if_pos < len(parts):        # Add back the conditions if any
+                            new_line.extend(["if"])
+                            # Process conditions
+                            conditions = []
+                            for cond in " ".join(parts[if_pos + 1:]).split(","):
+                                cond = cond.strip()
+                                if cond.startswith("not "):
+                                    conditions.append("neg_" + cond[4:])
+                                else:
+                                    conditions.append(cond)
+                            new_line.extend([", ".join(conditions)])
+                        processed_lines.append(" ".join(new_line))
+                    else:
+                        # Process only conditions if present
+                        if if_pos < len(parts):
+                            new_line = parts[:if_pos + 1]  # Everything up to "if"
+                            # Process conditions
+                            conditions = []
+                            for cond in " ".join(parts[if_pos + 1:]).split(","):
+                                cond = cond.strip()
+                                if cond.startswith("not "):
+                                    conditions.append("neg_" + cond[4:])
+                                else:
+                                    conditions.append(cond)
+                            new_line.extend([", ".join(conditions)])
+                            processed_lines.append(" ".join(new_line))
+                        else:
+                            processed_lines.append(line)
+                
+                elif parts[0] == "impossible":
+                    # Find the if part
+                    if_pos = -1
+                    for i, part in enumerate(parts):
+                        if part == "if":
+                            if_pos = i
+                            break
+                    
+                    if if_pos != -1:
+                        # Process conditions after "if"
+                        new_line = parts[:if_pos + 1]  # Everything up to "if"
+                        conditions = []
+                        for cond in " ".join(parts[if_pos + 1:]).split(","):
+                            cond = cond.strip()
+                            if cond.startswith("not "):
+                                conditions.append("neg_" + cond[4:])
+                            else:
+                                conditions.append(cond)
+                        new_line.extend([", ".join(conditions)])
+                        processed_lines.append(" ".join(new_line))
+                    else:
+                        processed_lines.append(line)
+                
+                elif parts[0] == "always":
+                    # Transform "always not X if not Y" into "impossible negate(X) if Y"
+                    # or "always X if Y" into "impossible negate(X) if Y"
+                    
+                    # Find the if part
+                    if_pos = -1
+                    for i, part in enumerate(parts):
+                        if part == "if":
+                            if_pos = i
+                            break
+                    
+                    # Get the effect (between "always" and "if" or end)
+                    effect_start = 1
+                    effect_end = if_pos if if_pos != -1 else len(parts)
+                    effect_parts = parts[effect_start:effect_end]
+                    
+                    # Handle the effect
+                    effect = ""
+                    if effect_parts[0] == "not":
+                        # For "always not X", we want "impossible X"
+                        effect = effect_parts[1]
+                    else:
+                        # For "always X", we want "impossible neg_X"
+                        effect = "neg_" + " ".join(effect_parts)
+                    
+                    # Create the impossible statement
+                    new_line = ["impossible", effect]
+                    
+                    # Add conditions if present
+                    if if_pos != -1:
+                        new_line.append("if")
+                        conditions = []
+                        for cond in " ".join(parts[if_pos + 1:]).split(","):
+                            cond = cond.strip()
+                            if cond.startswith("not "):
+                                # For conditions, we keep the original logic
+                                conditions.append("neg_" + cond[4:])
+                            else:
+                                conditions.append(cond)
+                        new_line.extend([", ".join(conditions)])
+                    
+                    processed_lines.append(" ".join(new_line))
+                
+                else:
+                    processed_lines.append(line)
+            
+            # Join the processed lines and send to semantics engine
+            processed_domain = "\n".join(processed_lines)
+            print("Processed domain definition:")
+            print(processed_domain)
+            
+            self.semantics.process_domain_definition(processed_domain)
+            
             # Update graph view if active
             if self.graph_mode_radio.isChecked():
                 self.domain_graph.scene().clear()
                 self.update_domain_graph()
+            
             QMessageBox.information(self, "Success", "Domain definition applied successfully!")
+            
         except Exception as e:
             print(f"Error in domain definition: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error in domain definition: {str(e)}")
@@ -777,13 +1057,73 @@ class MainWindow(QMainWindow):
             query_text = self.query_editor.toPlainText()
             print("Executing query:")
             print(query_text)
-            result, explanation = self.semantics.process_query(query_text)
-            print(f"Query result: {result}")
-            print(f"Explanation: {explanation}")
-            self.query_result.setText(f"Result: {'True' if result else 'False'}\nExplanation: {explanation}")
+            
+            # Pre-process queries
+            processed_queries = []
+            for line in query_text.split('\n'):
+                if not line.strip():
+                    continue
+                
+                parts = line.split()
+                if not parts:
+                    continue
+                
+                if parts[0] == "always":
+                    if parts[1] == "executable":
+                        # Transform "always executable X" to "executable X"
+                        processed_queries.append(" ".join(parts[1:]))
+                elif parts[0] == "sometimes":
+                    if "accessible" in line:
+                        # Transform "sometimes accessible X from Y in Z" to "accessible X from Y in Z"
+                        # Remove "sometimes" and keep the rest
+                        processed_queries.append(" ".join(parts[1:]))
+                    else:
+                        processed_queries.append(line)
+                elif parts[0] in ["executable", "accessible", "realisable", "active"]:
+                    processed_queries.append(line)
+                else:
+                    processed_queries.append(line)
+            
+            # Process each query separately
+            results = []
+            explanations = []
+            
+            for query in processed_queries:
+                if not query.strip():
+                    continue
+                    
+                print(f"Processing query: {query}")
+                try:
+                    result, explanation = self.semantics.process_query(query)
+                    results.append(result)
+                    explanations.append(explanation)
+                except Exception as e:
+                    print(f"Error processing individual query: {str(e)}")
+                    results.append(False)
+                    explanations.append(f"Error: {str(e)}")
+            
+            # Combine results
+            if results:
+                combined_result = "Results:\n"
+                for i, (result, explanation) in enumerate(zip(results, explanations)):
+                    original_query = query_text.split('\n')[i].strip()
+                    combined_result += f"Query: {original_query}\n"
+                    combined_result += f"Result: {result}\n"
+                    combined_result += f"Explanation: {explanation}\n\n"
+                
+                self.query_result.setText(combined_result)
+                
+                # Update graph view if active
+                if self.graph_mode_radio.isChecked():
+                    self.query_graph.scene().clear()
+                    self.update_query_graph()
+                    self.result_graph.scene().clear()
+                    self.update_result_graph()
+            
         except Exception as e:
             print(f"Error in query: {str(e)}")
             self.query_result.setText(f"Error: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error in query: {str(e)}")
     
     def load_problem(self, problem_name):
         """Load a problem from the database"""
