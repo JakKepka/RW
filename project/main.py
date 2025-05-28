@@ -129,8 +129,10 @@ class GraphNode(QGraphicsItem):
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True)
         self.setAcceptDrops(True)
-        self.dragging = False  # Add flag to track if we're dragging
-        self.is_toolbox_item = False  # Flag to identify toolbox items
+        self.dragging = False
+        self.is_toolbox_item = False
+        self.snap_to_line = True  # Enable line snapping by default
+        self.being_dragged = False  # New flag to prevent recursive dragging
         
         # Style based on type
         if node_type == "statement":
@@ -208,7 +210,8 @@ class GraphNode(QGraphicsItem):
                 return
             
             # If this is a toolbox item, create a new node
-            if self.is_toolbox_item:
+            if self.is_toolbox_item and not self.being_dragged:
+                self.being_dragged = True  # Set flag to prevent recursive dragging
                 drag = QDrag(view)
                 mime_data = QMimeData()
                 # Don't include node type in mime data for statement types
@@ -230,6 +233,7 @@ class GraphNode(QGraphicsItem):
                 
                 # Execute drag - original node stays in toolbox
                 drag.exec_(Qt.CopyAction)
+                self.being_dragged = False  # Reset flag after drag
             else:
                 # We're on the canvas - just move the node
                 self.dragging = True
@@ -280,9 +284,19 @@ class GraphNode(QGraphicsItem):
     
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange and self.scene():
-            # Update connected edges when position changes
+            # Get the new position
+            new_pos = value
+            
+            if self.snap_to_line and not self.is_toolbox_item:
+                # Snap to nearest line
+                new_y = self.scene().get_nearest_line_y(new_pos.y())
+                new_pos = QPointF(new_pos.x(), new_y)
+            
+            # Update edges
             for edge in self.edges:
                 edge.updatePosition()
+            
+            return new_pos
         return super().itemChange(change, value)
 
 class GraphEdge(QGraphicsLineItem):
@@ -441,6 +455,53 @@ class GraphScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSceneRect(-400, -300, 800, 600)
+        self.line_spacing = 80  # Increased spacing between lines
+        self.snap_threshold = 40  # Increased snap threshold
+        self.grid_lines = []  # Store grid lines
+        self.line_y_positions = []  # Store Y positions of lines
+        self.update_grid_lines()
+    
+    def update_grid_lines(self):
+        # Clear existing grid lines
+        for line in self.grid_lines:
+            self.removeItem(line)
+        self.grid_lines.clear()
+        self.line_y_positions.clear()
+        
+        # Create horizontal grid lines
+        rect = self.sceneRect()
+        num_lines = int(rect.height() / self.line_spacing)
+        start_y = rect.top() + self.line_spacing  # Start below the top edge
+        
+        for i in range(num_lines):
+            y = start_y + i * self.line_spacing
+            line = QGraphicsLineItem(rect.left(), y, rect.right(), y)
+            # Make lines more visible
+            line.setPen(QPen(QColor("#A0A0A0"), 1, Qt.DashLine))  # Darker gray, dashed line
+            line.setZValue(-1)  # Put lines behind other items
+            self.addItem(line)
+            self.grid_lines.append(line)
+            self.line_y_positions.append(y)
+    
+    def get_nearest_line_y(self, y_pos):
+        """Get the Y coordinate of the nearest grid line"""
+        if not self.line_y_positions:
+            return y_pos
+            
+        # Find the closest line
+        closest_y = None
+        min_distance = float('inf')
+        
+        for line_y in self.line_y_positions:
+            distance = abs(line_y - y_pos)
+            if distance < min_distance:
+                min_distance = distance
+                closest_y = line_y
+        
+        # Only snap if we're within the threshold
+        if min_distance <= self.snap_threshold:
+            return closest_y
+        return y_pos
     
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -554,6 +615,16 @@ class GraphView(QGraphicsView):
         # Set light gray background
         self.setBackgroundBrush(QBrush(QColor("#F5F5F5")))
         
+        # Set a reasonable view rect
+        self.setSceneRect(-400, -300, 800, 600)
+        
+        # Set initial transform
+        self.resetTransform()
+        self.scale(1.0, 1.0)  # Default scale
+        
+        # Center the view
+        self.centerOn(0, 0)
+    
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             # Zoom
@@ -702,11 +773,10 @@ class VisualQueryBuilder(QWidget):
         # Modifiers
         modifiers = QGroupBox("Modifiers")
         modifiers_layout = QVBoxLayout()
-        self.always_mod_btn = QPushButton("always")
         self.sometimes_btn = QPushButton("sometimes")
         self.not_btn = QPushButton("not")
         
-        for btn in [self.always_mod_btn, self.sometimes_btn, self.not_btn]:
+        for btn in [self.sometimes_btn, self.not_btn]:
             btn.setFixedSize(120, 40)
             btn.setStyleSheet("""
                 QPushButton {
@@ -842,7 +912,7 @@ class VisualQueryBuilder(QWidget):
         # Connect signals
         for btn in [self.causes_btn, self.always_btn, self.impossible_btn,
                    self.executable_btn, self.accessible_btn, self.realisable_btn, self.active_btn,
-                   self.always_mod_btn, self.sometimes_btn, self.not_btn,
+                   self.sometimes_btn, self.not_btn,
                    self.if_btn, self.by_btn, self.from_btn, self.in_btn]:
             btn.clicked.connect(self.add_element)
         
@@ -851,34 +921,81 @@ class VisualQueryBuilder(QWidget):
         # Initialize drag-and-drop functionality
         self.setup_drag_drop()
     
+    def position_node(self, node):
+        """Position a new node on the canvas"""
+        scene = self.canvas.scene()
+        if not scene:
+            return
+            
+        # For toolbox items, position them in the toolbox area
+        if node.is_toolbox_item:
+            items = [item for item in scene.items() if isinstance(item, GraphNode) and item.is_toolbox_item]
+            if items:
+                last_item = items[-1]
+                node.setPos(last_item.pos() + QPointF(150, 0))
+            else:
+                node.setPos(-350, -250)  # Top-left corner of toolbox area
+        else:
+            # For regular items (variables), position them in the main canvas area
+            # Use the first guide line's Y position, or a default if no lines exist
+            if scene.line_y_positions:
+                line_y = scene.line_y_positions[0]
+            else:
+                line_y = -100  # Default Y position if no guide lines
+            
+            # Find all nodes on this line
+            nodes_on_line = []
+            for item in scene.items():
+                if isinstance(item, GraphNode) and not item.is_toolbox_item:
+                    if abs(item.pos().y() - line_y) < 5:  # Same line tolerance
+                        nodes_on_line.append(item)
+            
+            # Position the new node
+            if nodes_on_line:
+                # Find rightmost node
+                rightmost_x = max(node.pos().x() for node in nodes_on_line)
+                node.setPos(rightmost_x + 120, line_y)  # Place to the right with some spacing
+            else:
+                node.setPos(-200, line_y)  # Start position on the line
+            
+            # Ensure the node is visible in the view
+            if self.canvas:
+                self.canvas.ensureVisible(node)
+    
     def add_variable(self, var_type):
         """Add a variable node from input"""
         input_widget = getattr(self, f"{var_type}_input")
         text = input_widget.toPlainText().strip()
         if text:
-            node = GraphNode(text, var_type)
-            node.is_toolbox_item = True  # Mark as toolbox item
-            self.canvas.scene().addItem(node)
-            self.position_node(node)
+            # Create node with appropriate type
+            if var_type == "action":
+                node = GraphNode(text, "action")
+            elif var_type == "effect":
+                node = GraphNode(text, "effect")
+            else:  # condition
+                node = GraphNode(text, "condition")
+            
+            # Add to scene as a regular (non-toolbox) item
+            node.is_toolbox_item = False
+            scene = self.canvas.scene()
+            if scene:
+                scene.addItem(node)
+                # Position the node
+                self.position_node(node)
+                # Ensure it's visible
+                self.canvas.ensureVisible(node)
+                # Center on the node
+                self.canvas.centerOn(node)
+            
             input_widget.clear()
             self.update_query_text()
-    
-    def position_node(self, node):
-        """Position a new node on the canvas"""
-        scene = self.canvas.scene()
-        items = [item for item in scene.items() if isinstance(item, GraphNode)]
-        if items:
-            last_item = items[-1]
-            node.setPos(last_item.pos() + QPointF(150, 0))
-        else:
-            node.setPos(0, 0)
     
     def setup_drag_drop(self):
         """Set up drag and drop functionality"""
         self.setAcceptDrops(True)
         for btn in [self.causes_btn, self.always_btn, self.impossible_btn,
                    self.executable_btn, self.accessible_btn, self.realisable_btn, self.active_btn,
-                   self.always_mod_btn, self.sometimes_btn, self.not_btn,
+                   self.sometimes_btn, self.not_btn,
                    self.if_btn, self.by_btn, self.from_btn, self.in_btn]:
             btn.setMouseTracking(True)
             btn.mousePressEvent = lambda e, b=btn: self.button_press(e, b)
@@ -921,18 +1038,83 @@ class VisualQueryBuilder(QWidget):
     def update_query_text(self):
         """Update the query text based on the canvas contents"""
         scene = self.canvas.scene()
+        if not scene:
+            return
+            
+        # Get all non-toolbox nodes
         nodes = [item for item in scene.items() if isinstance(item, GraphNode)]
-        edges = [item for item in scene.items() if isinstance(item, GraphEdge)]
         
-        # Sort nodes by x position to maintain left-to-right order
-        nodes.sort(key=lambda node: node.pos().x())
+        # Group nodes by their Y position (with some tolerance)
+        lines = {}
+        tolerance = 5  # pixels tolerance for grouping
         
-        # Build query text
-        query_parts = []
         for node in nodes:
-            query_parts.append(node.text)
+            # Skip toolbox template items but include user-added variables
+            if node.is_toolbox_item:
+                continue
+                
+            y_pos = node.pos().y()
+            # Find the closest existing line
+            matched = False
+            for line_y in lines.keys():
+                if abs(line_y - y_pos) <= tolerance:
+                    lines[line_y].append(node)
+                    matched = True
+                    break
+            if not matched:
+                lines[y_pos] = [node]
         
-        query = " ".join(query_parts)
+        # Sort nodes in each line by x position
+        for line_nodes in lines.values():
+            line_nodes.sort(key=lambda node: node.pos().x())
+        
+        # Convert lines to query text
+        query_parts = []
+        
+        # Process lines from top to bottom
+        for y in sorted(lines.keys()):
+            line_nodes = lines[y]
+            if not line_nodes:
+                continue
+            
+            # Build statement from the line's nodes
+            line_parts = []
+            for node in line_nodes:
+                line_parts.append(node.text)
+            
+            if line_parts:
+                # Special formatting for query types
+                if line_parts[0] in ["executable", "accessible", "realisable", "active"]:
+                    query_type = line_parts[0]
+                    remaining_parts = line_parts[1:]
+                    
+                    if query_type == "executable":
+                        query_parts.append(f"{query_type} {'; '.join(remaining_parts)}")
+                    elif query_type == "accessible":
+                        if "from" in remaining_parts:
+                            from_idx = remaining_parts.index("from")
+                            target = remaining_parts[:from_idx]
+                            conditions = remaining_parts[from_idx + 1:]
+                            query_parts.append(f"{query_type} {' '.join(target)} from {' '.join(conditions)}")
+                        else:
+                            query_parts.append(f"{query_type} {' '.join(remaining_parts)}")
+                    elif query_type in ["realisable", "active"]:
+                        if "by" in remaining_parts:
+                            by_idx = remaining_parts.index("by")
+                            actions = remaining_parts[:by_idx]
+                            agents = remaining_parts[by_idx + 1:]
+                            if query_type == "realisable":
+                                query_parts.append(f"{query_type} {'; '.join(actions)} by {', '.join(agents)}")
+                            else:
+                                query_parts.append(f"{query_type} {' '.join(actions)} by {', '.join(agents)}")
+                        else:
+                            query_parts.append(f"{query_type} {' '.join(remaining_parts)}")
+                else:
+                    # Regular statement (causes, impossible, etc.)
+                    query_parts.append(" ".join(line_parts))
+        
+        # Join all parts with newlines
+        query = "\n".join(query_parts)
         self.query_text.setText(query)
     
     def execute_query(self):
@@ -1063,8 +1245,32 @@ class VisualQueryBuilder(QWidget):
         self.update_query_text()
     
     def clear_canvas(self):
-        """Clear all items from the canvas"""
-        self.canvas.scene().clear()
+        """Clear all items from the canvas except guide lines"""
+        scene = self.canvas.scene()
+        if not scene:
+            return
+            
+        # Store guide line coordinates
+        rect = scene.sceneRect()
+        line_positions = scene.line_y_positions[:]
+        
+        # Clear everything
+        scene.clear()
+        
+        # Reset grid lines lists
+        scene.grid_lines = []
+        scene.line_y_positions = []
+        
+        # Recreate guide lines
+        for y in line_positions:
+            line = QGraphicsLineItem(rect.left(), y, rect.right(), y)
+            line.setPen(QPen(QColor("#A0A0A0"), 1, Qt.DashLine))
+            line.setZValue(-1)
+            scene.addItem(line)
+            scene.grid_lines.append(line)
+            scene.line_y_positions.append(y)
+        
+        # Clear query text
         self.query_text.clear()
 
 class MainWindow(QMainWindow):
