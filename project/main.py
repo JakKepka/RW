@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QGraphicsTextItem,
     QMenu,
     QInputDialog,
+    QGroupBox,
 )
 from PyQt5.QtCore import (
     Qt, 
@@ -33,6 +34,8 @@ from PyQt5.QtCore import (
     QRectF,
     QLineF,
     QSizeF,
+    QMimeData,
+    QPoint,
 )
 from PyQt5.QtGui import (
     QFont,
@@ -47,6 +50,8 @@ from PyQt5.QtGui import (
     QBrush,
     QPainter,
     QPainterPath,
+    QDrag,
+    QFontMetrics,
 )
 from engine.semantics import ActionSemantics
 from engine.executor import State
@@ -121,10 +126,18 @@ class GraphNode(QGraphicsItem):
         self.node_type = node_type
         self.setFlag(QGraphicsItem.ItemIsMovable)
         self.setFlag(QGraphicsItem.ItemIsSelectable)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True)
+        self.setAcceptDrops(True)
+        self.dragging = False  # Add flag to track if we're dragging
+        self.is_toolbox_item = False  # Flag to identify toolbox items
         
         # Style based on type
-        if node_type == "action":
+        if node_type == "statement":
+            self.width = 120
+            self.height = 40
+            self.color = QColor("#5F0F40")  # bordowy
+        elif node_type == "action":
             self.width = 100
             self.height = 40
             self.color = QColor("#9A031E")  # czerwony
@@ -164,7 +177,7 @@ class GraphNode(QGraphicsItem):
         
         painter.setPen(pen)
         
-        if self.node_type in ["action", "impossible_action"]:
+        if self.node_type in ["action", "impossible_action", "statement"]:
             painter.drawRect(self.boundingRect())
         elif self.node_type in ["effect", "impossible_effect"]:
             painter.drawEllipse(self.boundingRect())
@@ -182,7 +195,50 @@ class GraphNode(QGraphicsItem):
         painter.drawText(self.boundingRect(), Qt.AlignCenter, text_to_display)
     
     def mousePressEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.LeftButton:
+            if not self.scene():
+                return
+                
+            views = self.scene().views()
+            if not views:
+                return
+                
+            view = views[0]
+            if not view:
+                return
+            
+            # If this is a toolbox item, create a new node
+            if self.is_toolbox_item:
+                drag = QDrag(view)
+                mime_data = QMimeData()
+                # Don't include node type in mime data for statement types
+                if self.node_type == "statement":
+                    mime_data.setText(self.text)
+                else:
+                    mime_data.setText(f"{self.node_type}:{self.text}")
+                drag.setMimeData(mime_data)
+                
+                # Create pixmap of the node for drag visualization
+                pixmap = QPixmap(self.boundingRect().size().toSize())
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                self.paint(painter, None, None)
+                painter.end()
+                
+                drag.setPixmap(pixmap)
+                drag.setHotSpot(QPoint(int(pixmap.width()/2), int(pixmap.height()/2)))
+                
+                # Execute drag - original node stays in toolbox
+                drag.exec_(Qt.CopyAction)
+            else:
+                # We're on the canvas - just move the node
+                self.dragging = True
+                super().mousePressEvent(event)
+        
+        elif event.button() == Qt.RightButton:
+            if not self.scene():
+                return
+                
             menu = QMenu()
             edit_action = menu.addAction("Edit Text")
             delete_action = menu.addAction("Delete")
@@ -192,24 +248,42 @@ class GraphNode(QGraphicsItem):
                 new_text, ok = QInputDialog.getText(None, "Edit Node", "Enter new text:", text=self.text)
                 if ok:
                     self.text = new_text
-                    self.scene().update_text_from_graph()
+                    if self.scene():
+                        self.scene().update_text_from_graph()
             elif action == delete_action:
-                for edge in self.edges:
-                    self.scene().removeItem(edge)
-                self.scene().removeItem(self)
-                self.scene().update_text_from_graph()
-        else:
-            super().mousePressEvent(event)
+                scene = self.scene()
+                if scene:
+                    for edge in self.edges:
+                        scene.removeItem(edge)
+                    scene.removeItem(self)
+                    scene.update_text_from_graph()
     
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.dragging:
+            self.dragging = False
+            # Update connected edges
+            for edge in self.edges:
+                edge.updatePosition()
+            # Update query text
+            if self.scene():
+                for view in self.scene().views():
+                    if view and isinstance(view.parent(), VisualQueryBuilder):
+                        view.parent().update_query_text()
         super().mouseReleaseEvent(event)
-        self.scene().update_text_from_graph()
     
     def mouseMoveEvent(self, event):
-        super().mouseMoveEvent(event)
-        # Update connected edges when node is moved
-        for edge in self.edges:
-            edge.updatePosition()
+        if self.dragging:
+            super().mouseMoveEvent(event)
+            # Update connected edges while dragging
+            for edge in self.edges:
+                edge.updatePosition()
+    
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange and self.scene():
+            # Update connected edges when position changes
+            for edge in self.edges:
+                edge.updatePosition()
+        return super().itemChange(change, value)
 
 class GraphEdge(QGraphicsLineItem):
     def __init__(self, source_node, target_node, edge_type="causes", parent=None):
@@ -367,7 +441,44 @@ class GraphScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSceneRect(-400, -300, 800, 600)
-        
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+    
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+    
+    def dropEvent(self, event):
+        if event.mimeData().hasText():
+            # Get the drop position
+            pos = event.scenePos()
+            
+            # Get the text and create a node
+            text = event.mimeData().text()
+            if ":" in text:
+                node_type, text = text.split(":", 1)
+            else:
+                # Get the parent VisualQueryBuilder to determine node type
+                view = self.views()[0]
+                if view and isinstance(view.parent(), VisualQueryBuilder):
+                    node_type = view.parent().get_node_type(text)
+                else:
+                    node_type = "action"  # default type
+            
+            # Create and position the node
+            node = GraphNode(text, node_type)
+            self.addItem(node)
+            node.setPos(pos)
+            
+            # Update the query text
+            view = self.views()[0]
+            if view and isinstance(view.parent(), VisualQueryBuilder):
+                view.parent().update_query_text()
+            
+            event.acceptProposedAction()
+    
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:
             pos = event.scenePos()
@@ -431,10 +542,14 @@ class GraphView(QGraphicsView):
         self.setScene(GraphScene(self))
         self.setRenderHint(QPainter.Antialiasing)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setAcceptDrops(True)
+        
+        # Enable moving items by dragging
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setInteractive(True)
         
         # Set light gray background
         self.setBackgroundBrush(QBrush(QColor("#F5F5F5")))
@@ -448,6 +563,509 @@ class GraphView(QGraphicsView):
             self.scale(factor, factor)
         else:
             super().wheelEvent(event)
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+    
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+    
+    def dropEvent(self, event):
+        if event.mimeData().hasText():
+            text = event.mimeData().text()
+            pos = self.mapToScene(event.pos())
+            
+            # If text contains node type info
+            if ":" in text:
+                node_type, node_text = text.split(":", 1)
+                node = GraphNode(node_text, node_type)
+            else:
+                # Determine node type based on text content
+                node_type = self.get_node_type(text)
+                node = GraphNode(text, node_type)
+            
+            node.setPos(pos)
+            self.scene().addItem(node)
+            event.acceptProposedAction()
+            
+            # Update query text
+            if isinstance(self.parent(), VisualQueryBuilder):
+                self.parent().update_query_text()
+    
+    def get_node_type(self, text):
+        """Determine the node type based on text content"""
+        # Statement types
+        if text in ["causes", "always", "impossible"]:
+            return "statement"
+        # Action types
+        elif text in ["executable", "accessible", "realisable", "active"]:
+            return "action"
+        # Effect types
+        elif text in ["always", "sometimes", "not"]:
+            return "effect"
+        # Condition types
+        elif text in ["if", "by", "in", "from"]:
+            return "condition"
+        # Check for negated forms
+        elif text.startswith("not "):
+            base_text = text[4:]  # Remove "not " prefix
+            base_type = self.get_node_type(base_text)
+            return f"impossible_{base_type}" if base_type != "statement" else "statement"
+        # Default to condition for other text
+        else:
+            return "condition"
+
+class VisualQueryBuilder(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        self.domain_mode = False  # Flag to distinguish between domain and query modes
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Create toolbox for draggable elements
+        toolbox = QWidget()
+        toolbox_layout = QHBoxLayout(toolbox)
+        
+        # Statement types
+        statement_types = QGroupBox("Statement Types")
+        statement_types_layout = QVBoxLayout()
+        self.causes_btn = QPushButton("causes")
+        self.always_btn = QPushButton("always")
+        self.impossible_btn = QPushButton("impossible")
+        
+        for btn in [self.causes_btn, self.always_btn, self.impossible_btn]:
+            btn.setFixedSize(120, 40)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #5F0F40;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #7F1F50;
+                }
+            """)
+            statement_types_layout.addWidget(btn)
+        
+        statement_types.setLayout(statement_types_layout)
+        
+        # Add clear button
+        self.clear_btn = QPushButton("Clear Canvas")
+        self.clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d42828;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e83838;
+            }
+            QPushButton:pressed {
+                background-color: #c41818;
+            }
+        """)
+        self.clear_btn.clicked.connect(self.clear_canvas)
+        
+        # Query type buttons
+        query_types = QGroupBox("Query Types")
+        query_types_layout = QVBoxLayout()
+        self.executable_btn = QPushButton("executable")
+        self.accessible_btn = QPushButton("accessible")
+        self.realisable_btn = QPushButton("realisable")
+        self.active_btn = QPushButton("active")
+        
+        for btn in [self.executable_btn, self.accessible_btn, self.realisable_btn, self.active_btn]:
+            btn.setFixedSize(120, 40)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #9A031E;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #BA233E;
+                }
+            """)
+            query_types_layout.addWidget(btn)
+        
+        query_types.setLayout(query_types_layout)
+        
+        # Modifiers
+        modifiers = QGroupBox("Modifiers")
+        modifiers_layout = QVBoxLayout()
+        self.always_mod_btn = QPushButton("always")
+        self.sometimes_btn = QPushButton("sometimes")
+        self.not_btn = QPushButton("not")
+        
+        for btn in [self.always_mod_btn, self.sometimes_btn, self.not_btn]:
+            btn.setFixedSize(120, 40)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #CB793A;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #DB894A;
+                }
+            """)
+            modifiers_layout.addWidget(btn)
+        
+        modifiers.setLayout(modifiers_layout)
+        
+        # Connectors
+        connectors = QGroupBox("Connectors")
+        connectors_layout = QVBoxLayout()
+        self.if_btn = QPushButton("if")
+        self.by_btn = QPushButton("by")
+        self.from_btn = QPushButton("from")
+        self.in_btn = QPushButton("in")
+        
+        for btn in [self.if_btn, self.by_btn, self.from_btn, self.in_btn]:
+            btn.setFixedSize(120, 40)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FCDC4D;
+                    color: black;
+                    border: none;
+                    border-radius: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #FFEC5D;
+                }
+            """)
+            connectors_layout.addWidget(btn)
+        
+        connectors.setLayout(connectors_layout)
+        
+        # Variable input
+        variables = QGroupBox("Variables")
+        variables_layout = QVBoxLayout()
+        
+        # Action variable
+        action_layout = QHBoxLayout()
+        action_layout.addWidget(QLabel("Action:"))
+        self.action_input = QTextEdit()
+        self.action_input.setMaximumHeight(40)
+        self.action_input.setPlaceholderText("Enter action name")
+        action_layout.addWidget(self.action_input)
+        self.add_action_btn = QPushButton("Add")
+        self.add_action_btn.clicked.connect(lambda: self.add_variable("action"))
+        action_layout.addWidget(self.add_action_btn)
+        variables_layout.addLayout(action_layout)
+        
+        # Effect variable
+        effect_layout = QHBoxLayout()
+        effect_layout.addWidget(QLabel("Effect:"))
+        self.effect_input = QTextEdit()
+        self.effect_input.setMaximumHeight(40)
+        self.effect_input.setPlaceholderText("Enter effect name")
+        effect_layout.addWidget(self.effect_input)
+        self.add_effect_btn = QPushButton("Add")
+        self.add_effect_btn.clicked.connect(lambda: self.add_variable("effect"))
+        effect_layout.addWidget(self.add_effect_btn)
+        variables_layout.addLayout(effect_layout)
+        
+        # Condition variable
+        condition_layout = QHBoxLayout()
+        condition_layout.addWidget(QLabel("Condition:"))
+        self.condition_input = QTextEdit()
+        self.condition_input.setMaximumHeight(40)
+        self.condition_input.setPlaceholderText("Enter condition")
+        condition_layout.addWidget(self.condition_input)
+        self.add_condition_btn = QPushButton("Add")
+        self.add_condition_btn.clicked.connect(lambda: self.add_variable("condition"))
+        condition_layout.addWidget(self.add_condition_btn)
+        variables_layout.addLayout(condition_layout)
+        
+        variables.setLayout(variables_layout)
+        
+        # Available elements from domain
+        self.domain_elements = QGroupBox("Domain Elements")
+        self.domain_elements_layout = QVBoxLayout()
+        self.domain_elements.setLayout(self.domain_elements_layout)
+        
+        # Add groups to toolbox
+        toolbox_layout.addWidget(statement_types)
+        toolbox_layout.addWidget(query_types)
+        toolbox_layout.addWidget(modifiers)
+        toolbox_layout.addWidget(connectors)
+        toolbox_layout.addWidget(variables)
+        toolbox_layout.addWidget(self.domain_elements)
+        toolbox_layout.addWidget(self.clear_btn)
+        toolbox_layout.addStretch()
+        
+        # Create canvas for building queries
+        self.canvas = GraphView()
+        self.canvas.setMinimumHeight(400)
+        self.canvas.setAcceptDrops(True)
+        
+        # Create query text display
+        self.query_text = QTextEdit()
+        self.query_text.setReadOnly(True)
+        self.query_text.setMaximumHeight(100)
+        self.query_text.setPlaceholderText("Your query will appear here...")
+        
+        # Add execute button
+        self.execute_btn = QPushButton("Execute Query")
+        self.execute_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1084d8;
+            }
+        """)
+        
+        # Add components to main layout
+        layout.addWidget(toolbox)
+        layout.addWidget(self.canvas)
+        layout.addWidget(QLabel("Generated Query:"))
+        layout.addWidget(self.query_text)
+        layout.addWidget(self.execute_btn)
+        
+        # Connect signals
+        for btn in [self.causes_btn, self.always_btn, self.impossible_btn,
+                   self.executable_btn, self.accessible_btn, self.realisable_btn, self.active_btn,
+                   self.always_mod_btn, self.sometimes_btn, self.not_btn,
+                   self.if_btn, self.by_btn, self.from_btn, self.in_btn]:
+            btn.clicked.connect(self.add_element)
+        
+        self.execute_btn.clicked.connect(self.execute_query)
+        
+        # Initialize drag-and-drop functionality
+        self.setup_drag_drop()
+    
+    def add_variable(self, var_type):
+        """Add a variable node from input"""
+        input_widget = getattr(self, f"{var_type}_input")
+        text = input_widget.toPlainText().strip()
+        if text:
+            node = GraphNode(text, var_type)
+            node.is_toolbox_item = True  # Mark as toolbox item
+            self.canvas.scene().addItem(node)
+            self.position_node(node)
+            input_widget.clear()
+            self.update_query_text()
+    
+    def position_node(self, node):
+        """Position a new node on the canvas"""
+        scene = self.canvas.scene()
+        items = [item for item in scene.items() if isinstance(item, GraphNode)]
+        if items:
+            last_item = items[-1]
+            node.setPos(last_item.pos() + QPointF(150, 0))
+        else:
+            node.setPos(0, 0)
+    
+    def setup_drag_drop(self):
+        """Set up drag and drop functionality"""
+        self.setAcceptDrops(True)
+        for btn in [self.causes_btn, self.always_btn, self.impossible_btn,
+                   self.executable_btn, self.accessible_btn, self.realisable_btn, self.active_btn,
+                   self.always_mod_btn, self.sometimes_btn, self.not_btn,
+                   self.if_btn, self.by_btn, self.from_btn, self.in_btn]:
+            btn.setMouseTracking(True)
+            btn.mousePressEvent = lambda e, b=btn: self.button_press(e, b)
+    
+    def button_press(self, event, button):
+        """Handle button press for drag and drop"""
+        if event.button() == Qt.LeftButton:
+            drag = QDrag(button)
+            mime_data = QMimeData()
+            mime_data.setText(button.text())
+            drag.setMimeData(mime_data)
+            drag.exec_(Qt.MoveAction)  # Changed from CopyAction to MoveAction
+    
+    def add_element(self):
+        """Add a new element to the query canvas"""
+        sender = self.sender()
+        text = sender.text()
+        node_type = self.get_node_type(text)
+        
+        # Create new node and mark it as a toolbox item
+        node = GraphNode(text, node_type)
+        node.is_toolbox_item = True  # Mark as toolbox item
+        self.canvas.scene().addItem(node)
+        self.position_node(node)
+        
+        # Update the query text
+        self.update_query_text()
+    
+    def get_node_type(self, text):
+        """Determine the node type based on the text"""
+        if text in ["causes", "always", "impossible"]:
+            return "statement"
+        elif text in ["executable", "accessible", "realisable", "active"]:
+            return "action"
+        elif text in ["always", "sometimes", "not"]:
+            return "effect"
+        else:
+            return "condition"
+    
+    def update_query_text(self):
+        """Update the query text based on the canvas contents"""
+        scene = self.canvas.scene()
+        nodes = [item for item in scene.items() if isinstance(item, GraphNode)]
+        edges = [item for item in scene.items() if isinstance(item, GraphEdge)]
+        
+        # Sort nodes by x position to maintain left-to-right order
+        nodes.sort(key=lambda node: node.pos().x())
+        
+        # Build query text
+        query_parts = []
+        for node in nodes:
+            query_parts.append(node.text)
+        
+        query = " ".join(query_parts)
+        self.query_text.setText(query)
+    
+    def execute_query(self):
+        """Execute the current query"""
+        query = self.query_text.toPlainText()
+        if query:
+            # Get the main window instance
+            main_window = self.window()
+            if isinstance(main_window, MainWindow):
+                main_window.execute_query_text(query)
+    
+    def update_domain_elements(self, domain_text):
+        """Update available domain elements"""
+        # Clear existing elements
+        for i in reversed(range(self.domain_elements_layout.count())):
+            widget = self.domain_elements_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+        
+        # Parse domain text to extract actions and conditions
+        actions = set()
+        conditions = set()
+        
+        for line in domain_text.split('\n'):
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if not parts:
+                continue
+            
+            if parts[0] == "causes":
+                # Extract action
+                action = parts[1]
+                if "(" in action:
+                    action = action[:action.index("(")]
+                actions.add(action)
+                
+                # Extract effect
+                effect = parts[2]
+                conditions.add(effect)
+                
+                # Extract conditions after "if"
+                try:
+                    if_idx = parts.index("if")
+                    conditions_part = " ".join(parts[if_idx + 1:])
+                    for cond in conditions_part.split(","):
+                        cond = cond.strip()
+                        if cond.startswith("not "):
+                            cond = cond[4:]
+                        conditions.add(cond)
+                except ValueError:
+                    # No "if" found, continue without conditions
+                    pass
+            
+            elif parts[0] == "impossible":
+                # Extract action
+                action = parts[1]
+                if "(" in action:
+                    action = action[:action.index("(")]
+                actions.add(action)
+                
+                # Extract conditions after "if"
+                try:
+                    if_idx = parts.index("if")
+                    conditions_part = " ".join(parts[if_idx + 1:])
+                    for cond in conditions_part.split(","):
+                        cond = cond.strip()
+                        if cond.startswith("not "):
+                            cond = cond[4:]
+                        conditions.add(cond)
+                except ValueError:
+                    # No "if" found, continue without conditions
+                    pass
+        
+        # Create buttons for actions
+        if actions:
+            actions_group = QGroupBox("Actions")
+            actions_layout = QVBoxLayout()
+            for action in sorted(actions):
+                btn = QPushButton(action)
+                btn.setFixedSize(120, 40)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #9A031E;
+                        color: white;
+                        border: none;
+                        border-radius: 6px;
+                    }
+                    QPushButton:hover {
+                        background-color: #BA233E;
+                    }
+                """)
+                btn.clicked.connect(lambda checked, a=action: self.add_domain_element(a, "action"))
+                actions_layout.addWidget(btn)
+            actions_group.setLayout(actions_layout)
+            self.domain_elements_layout.addWidget(actions_group)
+        
+        # Create buttons for conditions
+        if conditions:
+            conditions_group = QGroupBox("Conditions")
+            conditions_layout = QVBoxLayout()
+            for condition in sorted(conditions):
+                btn = QPushButton(condition)
+                btn.setFixedSize(120, 40)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #FCDC4D;
+                        color: black;
+                        border: none;
+                        border-radius: 6px;
+                    }
+                    QPushButton:hover {
+                        background-color: #FFEC5D;
+                    }
+                """)
+                btn.clicked.connect(lambda checked, c=condition: self.add_domain_element(c, "condition"))
+                conditions_layout.addWidget(btn)
+            conditions_group.setLayout(conditions_layout)
+            self.domain_elements_layout.addWidget(conditions_group)
+    
+    def add_domain_element(self, text, element_type):
+        """Add a domain element to the canvas"""
+        node = GraphNode(text, element_type)
+        node.is_toolbox_item = True  # Mark as toolbox item
+        self.canvas.scene().addItem(node)
+        self.position_node(node)
+        self.update_query_text()
+    
+    def clear_canvas(self):
+        """Clear all items from the canvas"""
+        self.canvas.scene().clear()
+        self.query_text.clear()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -551,9 +1169,13 @@ class MainWindow(QMainWindow):
         query_layout.addWidget(self.query_result)
         query_layout.addWidget(self.result_graph)
         
+        # Visual Query Builder Tab
+        self.visual_query_tab = VisualQueryBuilder()
+        
         # Add tabs
         right_panel.addTab(domain_tab, "Domain Editor")
         right_panel.addTab(query_tab, "Query Analysis")
+        right_panel.addTab(self.visual_query_tab, "Visual Query Builder")
         
         # Add panels to main layout
         layout.addWidget(left_panel, 1)
@@ -908,137 +1530,11 @@ class MainWindow(QMainWindow):
             print("Applying domain definition:")
             print(domain_text)
             
-            # Pre-process domain text to handle negated effects and conditions
-            processed_lines = []
-            for line in domain_text.split('\n'):
-                if not line.strip():
-                    continue
-                    
-                parts = line.split()
-                if not parts:
-                    continue
-                
-                if parts[0] == "causes":
-                    # Find the effect part (after action, before possible 'if')
-                    action_end = 2  # After "causes action"
-                    if_pos = len(parts)  # Default to end of line
-                    for i, part in enumerate(parts):
-                        if part == "if":
-                            if_pos = i
-                            break
-                    
-                    # Check for negated effect
-                    effect_parts = parts[action_end:if_pos]
-                    if len(effect_parts) >= 2 and effect_parts[0] == "not":
-                        # Convert "not effect" to "neg_effect"
-                        new_effect = "neg_" + effect_parts[1]
-                        # Reconstruct the line
-                        new_line = parts[:action_end]  # "causes action"
-                        new_line.append(new_effect)    # "neg_effect"
-                        if if_pos < len(parts):        # Add back the conditions if any
-                            new_line.extend(["if"])
-                            # Process conditions
-                            conditions = []
-                            for cond in " ".join(parts[if_pos + 1:]).split(","):
-                                cond = cond.strip()
-                                if cond.startswith("not "):
-                                    conditions.append("neg_" + cond[4:])
-                                else:
-                                    conditions.append(cond)
-                            new_line.extend([", ".join(conditions)])
-                        processed_lines.append(" ".join(new_line))
-                    else:
-                        # Process only conditions if present
-                        if if_pos < len(parts):
-                            new_line = parts[:if_pos + 1]  # Everything up to "if"
-                            # Process conditions
-                            conditions = []
-                            for cond in " ".join(parts[if_pos + 1:]).split(","):
-                                cond = cond.strip()
-                                if cond.startswith("not "):
-                                    conditions.append("neg_" + cond[4:])
-                                else:
-                                    conditions.append(cond)
-                            new_line.extend([", ".join(conditions)])
-                            processed_lines.append(" ".join(new_line))
-                        else:
-                            processed_lines.append(line)
-                
-                elif parts[0] == "impossible":
-                    # Find the if part
-                    if_pos = -1
-                    for i, part in enumerate(parts):
-                        if part == "if":
-                            if_pos = i
-                            break
-                    
-                    if if_pos != -1:
-                        # Process conditions after "if"
-                        new_line = parts[:if_pos + 1]  # Everything up to "if"
-                        conditions = []
-                        for cond in " ".join(parts[if_pos + 1:]).split(","):
-                            cond = cond.strip()
-                            if cond.startswith("not "):
-                                conditions.append("neg_" + cond[4:])
-                            else:
-                                conditions.append(cond)
-                        new_line.extend([", ".join(conditions)])
-                        processed_lines.append(" ".join(new_line))
-                    else:
-                        processed_lines.append(line)
-                
-                elif parts[0] == "always":
-                    # Transform "always not X if not Y" into "impossible negate(X) if Y"
-                    # or "always X if Y" into "impossible negate(X) if Y"
-                    
-                    # Find the if part
-                    if_pos = -1
-                    for i, part in enumerate(parts):
-                        if part == "if":
-                            if_pos = i
-                            break
-                    
-                    # Get the effect (between "always" and "if" or end)
-                    effect_start = 1
-                    effect_end = if_pos if if_pos != -1 else len(parts)
-                    effect_parts = parts[effect_start:effect_end]
-                    
-                    # Handle the effect
-                    effect = ""
-                    if effect_parts[0] == "not":
-                        # For "always not X", we want "impossible X"
-                        effect = effect_parts[1]
-                    else:
-                        # For "always X", we want "impossible neg_X"
-                        effect = "neg_" + " ".join(effect_parts)
-                    
-                    # Create the impossible statement
-                    new_line = ["impossible", effect]
-                    
-                    # Add conditions if present
-                    if if_pos != -1:
-                        new_line.append("if")
-                        conditions = []
-                        for cond in " ".join(parts[if_pos + 1:]).split(","):
-                            cond = cond.strip()
-                            if cond.startswith("not "):
-                                # For conditions, we keep the original logic
-                                conditions.append("neg_" + cond[4:])
-                            else:
-                                conditions.append(cond)
-                        new_line.extend([", ".join(conditions)])
-                    
-                    processed_lines.append(" ".join(new_line))
-                
-                else:
-                    processed_lines.append(line)
+            # Update visual query builder with domain elements
+            self.visual_query_tab.update_domain_elements(domain_text)
             
-            # Join the processed lines and send to semantics engine
-            processed_domain = "\n".join(processed_lines)
-            print("Processed domain definition:")
-            print(processed_domain)
-            
-            self.semantics.process_domain_definition(processed_domain)
+            # Send domain text directly to semantics engine
+            self.semantics.process_domain_definition(domain_text)
             
             # Update graph view if active
             if self.graph_mode_radio.isChecked():
@@ -1193,13 +1689,13 @@ class MainWindow(QMainWindow):
                 border: 1px solid #3d3d3d;
                 border-radius: 4px;
                 padding: 5px;
-                font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+                font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
                 font-size: 13px;
             }
             QLabel {
                 color: #ffffff;
                 font-weight: bold;
-                font-family: -apple-system, 'SF Pro Text';
+                font-family: 'SF Pro Text', system-ui;
                 font-size: 13px;
             }
             QPushButton {
@@ -1208,7 +1704,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 padding: 8px 16px;
                 border-radius: 6px;
-                font-family: -apple-system, 'SF Pro Text';
+                font-family: 'SF Pro Text', system-ui;
             }
             QPushButton:hover {
                 background-color: #1084d8;
@@ -1310,6 +1806,11 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("Documentation")
         help_menu.addAction("About")
+
+    def execute_query_text(self, query_text):
+        """Execute a query from text (used by visual query builder)"""
+        self.query_editor.setText(query_text)
+        self.execute_query()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
