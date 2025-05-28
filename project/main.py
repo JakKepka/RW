@@ -26,6 +26,11 @@ from PyQt5.QtWidgets import (
     QGraphicsTextItem,
     QMenu,
     QInputDialog,
+    QLineEdit,
+    QGridLayout,
+    QFrame,
+    QDialog,
+    QDialogButtonBox,
 )
 from PyQt5.QtCore import (
     Qt, 
@@ -33,6 +38,7 @@ from PyQt5.QtCore import (
     QRectF,
     QLineF,
     QSizeF,
+    QMimeData,
 )
 from PyQt5.QtGui import (
     QFont,
@@ -47,6 +53,7 @@ from PyQt5.QtGui import (
     QBrush,
     QPainter,
     QPainterPath,
+    QDrag,
 )
 from engine.semantics import ActionSemantics
 from engine.executor import State
@@ -55,11 +62,11 @@ import graphviz
 import math  # Add import for math functions
 
 class SyntaxHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, colors=None):
         super().__init__(parent)
         
-        # Color palette for syntax only
-        self.colors = {
+        # Use provided colors or defaults
+        self.colors = colors or {
             'keywords': '#5F0F40',    # bordowy - dla słów kluczowych
             'agents': '#9A031E',      # czerwony - dla agentów
             'fluents': '#CB793A',     # pomarańczowy - dla fluentów
@@ -69,11 +76,11 @@ class SyntaxHighlighter(QSyntaxHighlighter):
         # Keyword patterns
         self.highlighting_rules = []
         
-        # Keywords format (causes, impossible, always, if)
+        # Keywords format (causes, impossible, always, if, not)
         keyword_format = QTextCharFormat()
         keyword_format.setForeground(QColor(self.colors['keywords']))
         keyword_format.setFontWeight(QFont.Bold)
-        keywords = ['causes', 'impossible', 'always', 'if', 'by', 'in', 'from']
+        keywords = ['causes', 'impossible', 'always', 'if', 'by', 'in', 'from', 'not']
         for word in keywords:
             pattern = f'\\b{word}\\b'
             self.highlighting_rules.append((re.compile(pattern), keyword_format))
@@ -107,7 +114,9 @@ class SyntaxHighlighter(QSyntaxHighlighter):
 class SyntaxTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.highlighter = SyntaxHighlighter(self.document())
+        # Get colors from MainWindow if available
+        colors = parent.colors if hasattr(parent, 'colors') else None
+        self.highlighter = SyntaxHighlighter(self.document(), colors)
         
         # Set font
         font = QFont('Menlo', 13)
@@ -449,11 +458,282 @@ class GraphView(QGraphicsView):
         else:
             super().wheelEvent(event)
 
+class TileWidget(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.Box | QFrame.Raised)
+        self.setLineWidth(2)
+        
+        layout = QVBoxLayout()
+        
+        # Text input
+        self.text_input = QLineEdit()
+        self.text_input.setPlaceholderText("Enter text...")
+        layout.addWidget(self.text_input)
+        
+        # Dropdown
+        self.dropdown = QComboBox()
+        self.dropdown.addItems(["Option 1", "Option 2", "Option 3"])
+        layout.addWidget(self.dropdown)
+        
+        self.setLayout(layout)
+        self.setMinimumSize(200, 120)  # Set minimum size for the tile
+
+class TileView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Main layout
+        main_layout = QVBoxLayout()
+        
+        # Create a scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # Container widget for the grid
+        container = QWidget()
+        grid_layout = QGridLayout()
+        
+        # Add 9 tiles in a 3x3 grid
+        for i in range(9):
+            tile = TileWidget()
+            row = i // 3
+            col = i % 3
+            grid_layout.addWidget(tile, row, col)
+        
+        container.setLayout(grid_layout)
+        scroll.setWidget(container)
+        main_layout.addWidget(scroll)
+        
+        # Add button to add more tiles
+        add_button = QPushButton("Add More Tiles")
+        add_button.clicked.connect(self.add_tiles)
+        main_layout.addWidget(add_button)
+        
+        self.setLayout(main_layout)
+        self.container = container
+        self.grid_layout = grid_layout
+        self.tile_count = 9
+    
+    def add_tiles(self):
+        # Add 3 more tiles in the next row
+        row = self.tile_count // 3
+        for i in range(3):
+            tile = TileWidget()
+            self.grid_layout.addWidget(tile, row, i)
+        self.tile_count += 3
+
+class DraggableLineEdit(QLineEdit):
+    def __init__(self, text, color_style, parent=None, fixed_width=None):
+        # Store original text and style first
+        self.original_text = text
+        self.original_style = color_style
+        
+        # Add spaces before text
+        text_with_spaces = text  # Bez dodatkowych spacji - użyjemy marginesów do centrowania
+        super().__init__(text_with_spaces, parent)
+        self.setStyleSheet(color_style)
+        self.setAlignment(Qt.AlignCenter)  # Wycentrowanie tekstu
+        
+        # Zwiększone marginesy dla lepszej widoczności i centrowania
+        self.setTextMargins(10, 6, 10, 6)  # Równe marginesy z lewej i prawej dla centrowania
+        
+        # Ustaw minimalną wysokość
+        self.setMinimumHeight(32)  # Zwiększona wysokość kafelka
+        
+        # Make widget draggable
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        
+        # Calculate width based on text content with minimum width
+        self.updateWidth()
+        
+        # Initially read-only, but can be edited on double-click
+        self.setReadOnly(True)
+        
+        # Connect signals for editing
+        self.editingFinished.connect(self.onEditingFinished)
+        
+        # Store drop position
+        self.drop_position = None
+    
+    def updateWidth(self):
+        # Calculate width based on text with some minimum
+        font_metrics = self.fontMetrics()
+        text_width = font_metrics.horizontalAdvance(self.text())
+        min_width = 60  # Zwiększona minimalna szerokość
+        padding = 30  # Zwiększony padding dla lepszego centrowania
+        
+        # Use max of calculated width and minimum width
+        content_width = max(text_width + padding, min_width)
+        self.setFixedWidth(content_width)
+    
+    def mouseDoubleClickEvent(self, event):
+        if self.isReadOnly():
+            self.setReadOnly(False)
+            # Podczas edycji pokazujemy tekst bez spacji
+            self.setText(self.original_text)
+            self.setStyleSheet(self.original_style + "background-color: rgba(255, 255, 255, 0.2);")
+            self.selectAll()
+    
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if not self.isReadOnly():
+            self.onEditingFinished()
+    
+    def onEditingFinished(self):
+        if not self.isReadOnly():
+            # Store new text without spaces
+            new_text = self.text().strip()
+            if new_text:
+                self.original_text = new_text
+                self.setText(new_text)
+            else:
+                # If empty, restore original text
+                self.setText(self.original_text)
+            
+            # Reset state
+            self.setReadOnly(True)
+            self.setStyleSheet(self.original_style)
+            self.updateWidth()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            # Cancel editing
+            self.setText(self.original_text)
+            self.setReadOnly(True)
+            self.setStyleSheet(self.original_style)
+            self.clearFocus()
+        elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            # Finish editing
+            self.clearFocus()
+        else:
+            super().keyPressEvent(event)
+    
+    def text(self):
+        # Return text without any extra spaces
+        return self.original_text
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+            self.setStyleSheet(self.original_style + "border: 2px dashed #FFFFFF;")
+    
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet(self.original_style)
+        self.drop_position = None
+    
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            # Get the relative position of the cursor in the widget
+            pos = event.pos()
+            widget_width = self.width()
+            
+            # If cursor is in the right third of the widget, mark for append
+            if pos.x() > widget_width * 2/3:
+                self.drop_position = "append"
+                self.setStyleSheet(self.original_style + "border-right: 2px dashed #FFFFFF;")
+            else:
+                self.drop_position = "swap"
+                self.setStyleSheet(self.original_style + "border: 2px dashed #FFFFFF;")
+            
+            event.acceptProposedAction()
+    
+    def dropEvent(self, event):
+        self.setStyleSheet(self.original_style)
+        
+        # Get the source widget
+        source = event.source()
+        if source and isinstance(source, DraggableLineEdit):
+            # Get the parent layouts
+            source_parent = source.parent()
+            target_parent = self.parent()
+            
+            if source_parent and target_parent:
+                source_layout = source_parent.layout()
+                target_layout = target_parent.layout()
+                
+                if self.drop_position == "append":
+                    # Create a copy of the source block
+                    new_block = DraggableLineEdit(source.text(), source.original_style, target_parent)
+                    
+                    # Find the index of the current widget and the stretch
+                    current_index = -1
+                    stretch_index = -1
+                    for i in range(target_layout.count()):
+                        item = target_layout.itemAt(i)
+                        if item.widget() == self:
+                            current_index = i
+                        elif item.widget() is None:  # This is the stretch
+                            stretch_index = i
+                            break
+                    
+                    if current_index != -1:
+                        # Insert the new block after the current widget
+                        target_layout.insertWidget(current_index + 1, new_block)
+                    
+                    # If source is from a different line, remove it
+                    if source_parent != target_parent:
+                        source_layout.removeWidget(source)
+                        source.deleteLater()
+                        
+                        # Make sure source line still has a stretch
+                        has_stretch = False
+                        for i in range(source_layout.count()):
+                            if source_layout.itemAt(i).widget() is None:
+                                has_stretch = True
+                                break
+                        if not has_stretch:
+                            source_layout.addStretch()
+                else:
+                    # Original swap behavior
+                    source_text = source.text()
+                    source_style = source.original_style
+                    target_text = self.text()
+                    target_style = self.original_style
+                    
+                    source.setText(target_text)
+                    source.original_text = target_text
+                    source.setStyleSheet(target_style)
+                    source.original_style = target_style
+                    source.updateWidth()
+                    
+                    self.setText(source_text)
+                    self.original_text = source_text
+                    self.setStyleSheet(source_style)
+                    self.original_style = source_style
+                    self.updateWidth()
+        
+        self.drop_position = None
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.isReadOnly():
+            drag = QDrag(self)
+            mime_data = QMimeData()
+            mime_data.setText(self.text())
+            drag.setMimeData(mime_data)
+            
+            # Create pixmap for drag visualization
+            pixmap = QPixmap(self.size())
+            self.render(pixmap)
+            drag.setPixmap(pixmap)
+            
+            drag.exec_(Qt.MoveAction)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Multi-Agent Action Programs Analysis System")
         self.setMinimumSize(1200, 800)
+        
+        # Initialize colors for syntax highlighting and edit view
+        self.colors = {
+            'keywords': '#5F0F40',    # bordowy - dla słów kluczowych
+            'agents': '#9A031E',      # czerwony - dla agentów
+            'fluents': '#CB793A',     # pomarańczowy - dla fluentów
+            'conditions': '#FCDC4D'    # żółty - dla warunków
+        }
         
         # Initialize semantics engine
         self.semantics = ActionSemantics()
@@ -550,10 +830,32 @@ class MainWindow(QMainWindow):
         query_layout.addWidget(QLabel("Result:"))
         query_layout.addWidget(self.query_result)
         query_layout.addWidget(self.result_graph)
+
+        # Create empty Edit View Tab
+        edit_view_tab = QWidget()
+        edit_layout = QVBoxLayout(edit_view_tab)
+        
+        # Create scroll area for the edit view
+        edit_scroll = QScrollArea()
+        edit_scroll.setWidgetResizable(True)
+        
+        # Container for the edit content
+        edit_container = QWidget()
+        self.edit_container_layout = QVBoxLayout(edit_container)
+        
+        # Add refresh button at the top
+        refresh_btn = QPushButton("Refresh from Domain Definition")
+        refresh_btn.clicked.connect(self.refresh_edit_view)
+        edit_layout.addWidget(refresh_btn)
+        
+        # Add scroll area to layout
+        edit_scroll.setWidget(edit_container)
+        edit_layout.addWidget(edit_scroll)
         
         # Add tabs
         right_panel.addTab(domain_tab, "Domain Editor")
         right_panel.addTab(query_tab, "Query Analysis")
+        right_panel.addTab(edit_view_tab, "Edit View")
         
         # Add panels to main layout
         layout.addWidget(left_panel, 1)
@@ -562,8 +864,11 @@ class MainWindow(QMainWindow):
         # Create menu bar
         self.create_menu_bar()
         
-        # Load initial problem
-        self.load_problem(self.problem_combo.currentText())
+        # Initialize database manager and load first problem
+        from db.database import DatabaseManager
+        self.db_manager = DatabaseManager()
+        first_problem = self.db_manager.get_all_problems()[0]
+        self.load_problem(first_problem['name'])
     
     def switch_view_mode(self, button):
         """Switch between text and graph view modes"""
@@ -1310,6 +1615,409 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("Documentation")
         help_menu.addAction("About")
+
+    def refresh_edit_view(self):
+        """Refresh the Edit View with current Domain Definition content"""
+        # Clear existing content
+        while self.edit_container_layout.count():
+            child = self.edit_container_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Create a white background widget for the entire edit view
+        canvas_widget = QWidget()
+        canvas_widget.setStyleSheet("background-color: white; border-radius: 8px;")
+        canvas_layout = QVBoxLayout(canvas_widget)
+        canvas_layout.setContentsMargins(20, 20, 20, 20)
+        canvas_layout.setSpacing(15)
+        
+        # Add plus button in top-right corner
+        top_bar = QHBoxLayout()
+        top_bar.addStretch()
+        add_button = QPushButton("+")
+        add_button.setStyleSheet("""
+            QPushButton {
+                background-color: #5F0F40;
+                color: white;
+                border-radius: 15px;
+                min-width: 30px;
+                min-height: 30px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7F1F50;
+            }
+        """)
+        add_button.clicked.connect(self.add_new_block)
+        top_bar.addWidget(add_button)
+        canvas_layout.addLayout(top_bar)
+        
+        # Get domain definition text
+        domain_text = self.domain_editor.toPlainText()
+        lines = domain_text.split('\n')
+        
+        # Store layout for adding new blocks
+        self.current_canvas_layout = canvas_layout
+        
+        # Process each line
+        for line in lines:
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if not parts:
+                continue
+            
+            # Create horizontal layout for each line with proper alignment
+            line_widget = QWidget()
+            line_widget.setStyleSheet("background-color: transparent;")
+            line_layout = QHBoxLayout(line_widget)
+            line_layout.setContentsMargins(0, 0, 0, 0)
+            line_layout.setSpacing(8)
+            line_layout.setAlignment(Qt.AlignLeft)
+            
+            if parts[0] in ['causes', 'impossible', 'always']:
+                # Create colored textbox for keyword
+                keyword_style = f"""
+                    background-color: {self.colors['keywords']};
+                    color: white;
+                    border-radius: 3px;
+                    padding: 3px;
+                    margin: 0px;
+                """
+                keyword_box = DraggableLineEdit(parts[0], keyword_style)
+                line_layout.addWidget(keyword_box)
+                
+                if parts[0] == 'causes':
+                    # Action part
+                    action_style = f"""
+                        background-color: {self.colors['agents']};
+                        color: white;
+                        border-radius: 3px;
+                        padding: 3px;
+                        margin: 0px;
+                    """
+                    action_box = DraggableLineEdit(' '.join(parts[1:2]), action_style)
+                    line_layout.addWidget(action_box)
+                    
+                    # Effect part
+                    effect_start = 2
+                    if len(parts) > 2 and parts[2] == 'not':
+                        not_style = f"""
+                            background-color: {self.colors['keywords']};
+                            color: white;
+                            border-radius: 3px;
+                            padding: 3px;
+                            margin: 0px;
+                        """
+                        not_box = DraggableLineEdit('not', not_style)
+                        line_layout.addWidget(not_box)
+                        effect_start = 3
+                    
+                    effect_style = f"""
+                        background-color: {self.colors['fluents']};
+                        color: white;
+                        border-radius: 3px;
+                        padding: 3px;
+                        margin: 0px;
+                    """
+                    effect_box = DraggableLineEdit(' '.join(parts[effect_start:effect_start+1]), effect_style)
+                    line_layout.addWidget(effect_box)
+                    
+                    # Conditions part (if exists)
+                    if 'if' in parts:
+                        if_idx = parts.index('if')
+                        if_style = f"""
+                            background-color: {self.colors['keywords']};
+                            color: white;
+                            border-radius: 3px;
+                            padding: 3px;
+                            margin: 0px;
+                        """
+                        if_box = DraggableLineEdit('if', if_style)
+                        line_layout.addWidget(if_box)
+                        
+                        # Process conditions with 'not'
+                        i = if_idx + 1
+                        while i < len(parts):
+                            if parts[i] == 'not':
+                                not_box = DraggableLineEdit('not', not_style)
+                                line_layout.addWidget(not_box)
+                                i += 1
+                                if i < len(parts) and parts[i] != ',':
+                                    cond_style = f"""
+                                        background-color: {self.colors['conditions']};
+                                        color: black;
+                                        border-radius: 3px;
+                                        padding: 3px;
+                                        margin: 0px;
+                                    """
+                                    cond_box = DraggableLineEdit(parts[i], cond_style)
+                                    line_layout.addWidget(cond_box)
+                            else:
+                                if parts[i] != ',':
+                                    cond_style = f"""
+                                        background-color: {self.colors['conditions']};
+                                        color: black;
+                                        border-radius: 3px;
+                                        padding: 3px;
+                                        margin: 0px;
+                                    """
+                                    cond_box = DraggableLineEdit(parts[i], cond_style)
+                                    line_layout.addWidget(cond_box)
+                            i += 1
+                
+                elif parts[0] == 'impossible':
+                    # Action part
+                    action_style = f"""
+                        background-color: {self.colors['agents']};
+                        color: white;
+                        border-radius: 3px;
+                        padding: 3px;
+                        margin: 0px;
+                    """
+                    action_box = DraggableLineEdit(' '.join(parts[1:2]), action_style)
+                    line_layout.addWidget(action_box)
+                    
+                    # Conditions part (if exists)
+                    if 'if' in parts:
+                        if_idx = parts.index('if')
+                        if_style = f"""
+                            background-color: {self.colors['keywords']};
+                            color: white;
+                            border-radius: 3px;
+                            padding: 3px;
+                            margin: 0px;
+                        """
+                        if_box = DraggableLineEdit('if', if_style)
+                        line_layout.addWidget(if_box)
+                        
+                        # Process conditions with 'not'
+                        i = if_idx + 1
+                        while i < len(parts):
+                            if parts[i] == 'not':
+                                not_style = f"""
+                                    background-color: {self.colors['keywords']};
+                                    color: white;
+                                    border-radius: 3px;
+                                    padding: 3px;
+                                    margin: 0px;
+                                """
+                                not_box = DraggableLineEdit('not', not_style)
+                                line_layout.addWidget(not_box)
+                                i += 1
+                                if i < len(parts) and parts[i] != ',':
+                                    cond_style = f"""
+                                        background-color: {self.colors['conditions']};
+                                        color: black;
+                                        border-radius: 3px;
+                                        padding: 3px;
+                                        margin: 0px;
+                                    """
+                                    cond_box = DraggableLineEdit(parts[i], cond_style)
+                                    line_layout.addWidget(cond_box)
+                            else:
+                                if parts[i] != ',':
+                                    cond_style = f"""
+                                        background-color: {self.colors['conditions']};
+                                        color: black;
+                                        border-radius: 3px;
+                                        padding: 3px;
+                                        margin: 0px;
+                                    """
+                                    cond_box = DraggableLineEdit(parts[i], cond_style)
+                                    line_layout.addWidget(cond_box)
+                            i += 1
+                
+                elif parts[0] == 'always':
+                    # Effect part with possible 'not'
+                    effect_start = 1
+                    if len(parts) > 1 and parts[1] == 'not':
+                        not_style = f"""
+                            background-color: {self.colors['keywords']};
+                            color: white;
+                            border-radius: 3px;
+                            padding: 3px;
+                            margin: 0px;
+                        """
+                        not_box = DraggableLineEdit('not', not_style)
+                        line_layout.addWidget(not_box)
+                        effect_start = 2
+                    
+                    effect_style = f"""
+                        background-color: {self.colors['fluents']};
+                        color: white;
+                        border-radius: 3px;
+                        padding: 3px;
+                        margin: 0px;
+                    """
+                    effect_box = DraggableLineEdit(' '.join(parts[effect_start:effect_start+1]), effect_style)
+                    line_layout.addWidget(effect_box)
+                    
+                    # Conditions part (if exists)
+                    if 'if' in parts:
+                        if_idx = parts.index('if')
+                        if_style = f"""
+                            background-color: {self.colors['keywords']};
+                            color: white;
+                            border-radius: 3px;
+                            padding: 3px;
+                            margin: 0px;
+                        """
+                        if_box = DraggableLineEdit('if', if_style)
+                        line_layout.addWidget(if_box)
+                        
+                        # Process conditions with 'not'
+                        i = if_idx + 1
+                        while i < len(parts):
+                            if parts[i] == 'not':
+                                not_style = f"""
+                                    background-color: {self.colors['keywords']};
+                                    color: white;
+                                    border-radius: 3px;
+                                    padding: 3px;
+                                    margin: 0px;
+                                """
+                                not_box = DraggableLineEdit('not', not_style)
+                                line_layout.addWidget(not_box)
+                                i += 1
+                                if i < len(parts) and parts[i] != ',':
+                                    cond_style = f"""
+                                        background-color: {self.colors['conditions']};
+                                        color: black;
+                                        border-radius: 3px;
+                                        padding: 3px;
+                                        margin: 0px;
+                                    """
+                                    cond_box = DraggableLineEdit(parts[i], cond_style)
+                                    line_layout.addWidget(cond_box)
+                            else:
+                                if parts[i] != ',':
+                                    cond_style = f"""
+                                        background-color: {self.colors['conditions']};
+                                        color: black;
+                                        border-radius: 3px;
+                                        padding: 3px;
+                                        margin: 0px;
+                                    """
+                                    cond_box = DraggableLineEdit(parts[i], cond_style)
+                                    line_layout.addWidget(cond_box)
+                            i += 1
+            
+            # Add stretch to push elements to the left
+            line_layout.addStretch()
+            
+            # Add the line widget to the canvas
+            canvas_layout.addWidget(line_widget)
+        
+        # Add stretch at the end to push everything to the top
+        canvas_layout.addStretch()
+        
+        # Add the canvas to the main container
+        self.edit_container_layout.addWidget(canvas_widget)
+        self.edit_container_layout.addStretch()
+
+    def add_new_block(self):
+        dialog = NewBlockDialog(self.colors, self)
+        if dialog.exec_() == QDialog.Accepted:
+            content, color = dialog.get_block_data()
+            if content:
+                # Create new line widget
+                line_widget = QWidget()
+                line_widget.setStyleSheet("background-color: transparent;")
+                line_layout = QHBoxLayout(line_widget)
+                line_layout.setContentsMargins(0, 0, 0, 0)
+                line_layout.setSpacing(8)
+                line_layout.setAlignment(Qt.AlignLeft)
+                
+                # Create new block
+                style = f"""
+                    background-color: {color};
+                    color: {'black' if color == self.colors['conditions'] else 'white'};
+                    border-radius: 3px;
+                    padding: 3px;
+                    margin: 0px;
+                """
+                block = DraggableLineEdit(content, style)
+                line_layout.addWidget(block)
+                line_layout.addStretch()
+                
+                # Add new line before the last stretch
+                self.current_canvas_layout.insertWidget(self.current_canvas_layout.count() - 1, line_widget)
+
+class NewBlockDialog(QDialog):
+    def __init__(self, colors, parent=None):
+        super().__init__(parent)
+        self.colors = colors
+        self.setWindowTitle("Dodaj nowy bloczek")
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Typ bloczka
+        type_layout = QHBoxLayout()
+        type_label = QLabel("Typ bloczka:")
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["Słowo kluczowe", "Agent/Akcja", "Efekt", "Warunek"])
+        type_layout.addWidget(type_label)
+        type_layout.addWidget(self.type_combo)
+        layout.addLayout(type_layout)
+        
+        # Zawartość
+        content_layout = QHBoxLayout()
+        content_label = QLabel("Zawartość:")
+        self.content_combo = QComboBox()
+        self.content_combo.setEditable(True)
+        self.content_combo.addItems(["causes", "impossible", "always", "if", "not", "by"])
+        self.content_line = QLineEdit()
+        content_layout.addWidget(content_label)
+        content_layout.addWidget(self.content_combo)
+        content_layout.addWidget(self.content_line)
+        self.content_line.hide()  # Początkowo ukryty
+        layout.addLayout(content_layout)
+        
+        # Przyciski
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # Połącz sygnał zmiany typu
+        self.type_combo.currentIndexChanged.connect(self.on_type_changed)
+        self.on_type_changed(0)  # Ustaw początkowy stan
+        
+        self.setMinimumWidth(300)
+    
+    def on_type_changed(self, index):
+        if index == 0:  # Słowo kluczowe
+            self.content_combo.show()
+            self.content_line.hide()
+            self.content_combo.setCurrentIndex(0)
+        else:
+            self.content_combo.hide()
+            self.content_line.show()
+            self.content_line.clear()
+    
+    def get_block_data(self):
+        block_type = self.type_combo.currentText()
+        if block_type == "Słowo kluczowe":
+            content = self.content_combo.currentText()
+            color = self.colors['keywords']
+        elif block_type == "Agent/Akcja":
+            content = self.content_line.text()
+            color = self.colors['agents']
+        elif block_type == "Efekt":
+            content = self.content_line.text()
+            color = self.colors['fluents']
+        else:  # Warunek
+            content = self.content_line.text()
+            color = self.colors['conditions']
+        
+        return content, color
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

@@ -15,12 +15,21 @@ class DatabaseManager:
     
     def _init_db(self):
         """Initialize database with schema"""
-        with open('db/schema.sql', 'r') as f:
-            schema = f.read()
+        # Get the directory where this file (database.py) is located
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        schema_path = os.path.join(current_dir, 'schema.sql')
         
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executescript(schema)
-            conn.commit()
+        try:
+            with open(schema_path, 'r') as f:
+                schema = f.read()
+            
+            with sqlite3.connect(self.db_path) as conn:
+                conn.executescript(schema)
+                conn.commit()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Schema file not found at {schema_path}")
+        except sqlite3.Error as e:
+            raise sqlite3.Error(f"Database error while initializing: {str(e)}")
     
     def get_all_problems(self) -> List[Dict]:
         """Get all problems from database"""
