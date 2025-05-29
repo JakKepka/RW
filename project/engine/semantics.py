@@ -6,10 +6,14 @@ class ActionSemantics:
     def __init__(self):
         self.parser = ActionParser()
         self.executor = ActionExecutor()
+        self.initial_state = State(fluents=set(), released=set())
         
     def process_domain_definition(self, text: str):
         """Process a domain definition text"""
         try:
+            # Reset initial state
+            self.initial_state = State(fluents=set(), released=set())
+            
             # Split text into lines and process each line separately
             lines = text.strip().split('\n')
             for line in lines:
@@ -21,7 +25,15 @@ class ActionSemantics:
                 stmt = self.parser.parse_statement(line)
                 
                 # Process based on statement type
-                if stmt["type"] == "causes":
+                if stmt["type"] == "initially":
+                    # Process initial state declarations
+                    for fluent_type, fluent in stmt["fluents"]:
+                        if fluent_type == "pos":
+                            self.initial_state.fluents.add(fluent)
+                        else:  # fluent_type == "not"
+                            self.initial_state.fluents.discard(fluent)
+                            
+                elif stmt["type"] == "causes":
                     action = stmt["action"][0]  # Get action name
                     if len(stmt["action"]) > 1:  # Has agents
                         action = f"{action}({','.join(stmt['action'][2:-1])})"  # Skip parentheses
@@ -68,6 +80,9 @@ class ActionSemantics:
         try:
             print(f"Processing query: {query_text}")
             query = self.parser.parse_query(query_text)
+            
+            # Use provided initial state or the one from domain definition
+            state = initial_state if initial_state is not None else self.initial_state
             
             # For now, return a dummy result
             return True, "Query processed successfully"

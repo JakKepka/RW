@@ -68,7 +68,8 @@ class SyntaxHighlighter(QSyntaxHighlighter):
             'keywords': '#5F0F40',    # bordowy - dla słów kluczowych
             'agents': '#9A031E',      # czerwony - dla agentów
             'fluents': '#CB793A',     # pomarańczowy - dla fluentów
-            'conditions': '#FCDC4D'    # żółty - dla warunków
+            'conditions': '#FCDC4D',   # żółty - dla warunków
+            'initial': '#4CAF50'      # zielony - dla initial state
         }
         
         # Keyword patterns
@@ -78,10 +79,19 @@ class SyntaxHighlighter(QSyntaxHighlighter):
         keyword_format = QTextCharFormat()
         keyword_format.setForeground(QColor(self.colors['keywords']))
         keyword_format.setFontWeight(QFont.Bold)
-        keywords = ['causes', 'impossible', 'always', 'if', 'by', 'in', 'from']
+        keywords = ['causes', 'impossible', 'always', 'if', 'by', 'in', 'from', 'initially']
         for word in keywords:
             pattern = f'\\b{word}\\b'
             self.highlighting_rules.append((re.compile(pattern), keyword_format))
+        
+        # Initial state format
+        initial_format = QTextCharFormat()
+        initial_format.setForeground(QColor(self.colors['initial']))
+        initial_format.setFontWeight(QFont.Bold)
+        self.highlighting_rules.append((
+            re.compile(r'(?<=initially\s)(.+)$', re.MULTILINE),
+            initial_format
+        ))
         
         # Agents and actions format (inside parentheses)
         agent_format = QTextCharFormat()
@@ -163,6 +173,10 @@ class GraphNode(QGraphicsItem):
             self.width = 120
             self.height = 40
             self.color = QColor("#FFD700")  # jaskrawy żółty dla zanegowanych warunków
+        elif node_type == "initial":
+            self.width = 120
+            self.height = 40
+            self.color = QColor("#4CAF50")  # zielony dla initial state
         
         self.edges = []
     
@@ -179,7 +193,19 @@ class GraphNode(QGraphicsItem):
         
         painter.setPen(pen)
         
-        if self.node_type in ["action", "impossible_action", "statement"]:
+        if self.node_type == "initial":
+            # Draw hexagon for initial state
+            path = QPainterPath()
+            w, h = self.width/2, self.height/2
+            path.moveTo(-w, 0)
+            path.lineTo(-w/2, -h)
+            path.lineTo(w/2, -h)
+            path.lineTo(w, 0)
+            path.lineTo(w/2, h)
+            path.lineTo(-w/2, h)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif self.node_type in ["action", "impossible_action", "statement"]:
             painter.drawRect(self.boundingRect())
         elif self.node_type in ["effect", "impossible_effect"]:
             painter.drawEllipse(self.boundingRect())
@@ -668,7 +694,9 @@ class GraphView(QGraphicsView):
     def get_node_type(self, text):
         """Determine the node type based on text content"""
         # Statement types
-        if text in ["causes", "always", "impossible"]:
+        if text == "initially":
+            return "initial"
+        elif text in ["causes", "always", "impossible"]:
             return "statement"
         # Action types
         elif text in ["executable", "accessible", "realisable", "active"]:
@@ -683,6 +711,8 @@ class GraphView(QGraphicsView):
         elif text.startswith("not "):
             base_text = text[4:]  # Remove "not " prefix
             base_type = self.get_node_type(base_text)
+            if base_type == "initial":
+                return "impossible_initial"
             return f"impossible_{base_type}" if base_type != "statement" else "statement"
         # Default to condition for other text
         else:
@@ -707,8 +737,9 @@ class VisualQueryBuilder(QWidget):
         self.causes_btn = QPushButton("causes")
         self.always_btn = QPushButton("always")
         self.impossible_btn = QPushButton("impossible")
+        self.initially_btn = QPushButton("initially")  # Add initially button
         
-        for btn in [self.causes_btn, self.always_btn, self.impossible_btn]:
+        for btn in [self.causes_btn, self.always_btn, self.impossible_btn, self.initially_btn]:
             btn.setFixedSize(120, 40)
             btn.setStyleSheet("""
                 QPushButton {
@@ -722,6 +753,19 @@ class VisualQueryBuilder(QWidget):
                 }
             """)
             statement_types_layout.addWidget(btn)
+        
+        # Special style for initially button
+        self.initially_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
         
         statement_types.setLayout(statement_types_layout)
         
@@ -1025,18 +1069,34 @@ class VisualQueryBuilder(QWidget):
         self.update_query_text()
     
     def get_node_type(self, text):
-        """Determine the node type based on the text"""
-        if text in ["causes", "always", "impossible"]:
+        """Determine the node type based on text content"""
+        # Statement types
+        if text == "initially":
+            return "initial"
+        elif text in ["causes", "always", "impossible"]:
             return "statement"
+        # Action types
         elif text in ["executable", "accessible", "realisable", "active"]:
             return "action"
+        # Effect types
         elif text in ["always", "sometimes", "not"]:
             return "effect"
+        # Condition types
+        elif text in ["if", "by", "in", "from"]:
+            return "condition"
+        # Check for negated forms
+        elif text.startswith("not "):
+            base_text = text[4:]  # Remove "not " prefix
+            base_type = self.get_node_type(base_text)
+            if base_type == "initial":
+                return "impossible_initial"
+            return f"impossible_{base_type}" if base_type != "statement" else "statement"
+        # Default to condition for other text
         else:
             return "condition"
     
     def update_query_text(self):
-        """Update the query text based on the canvas contents"""
+        """Convert graph to text representation"""
         scene = self.canvas.scene()
         if not scene:
             return
@@ -1080,7 +1140,16 @@ class VisualQueryBuilder(QWidget):
             # Build statement from the line's nodes
             line_parts = []
             for node in line_nodes:
-                line_parts.append(node.text)
+                if node.node_type == "initial" or node.node_type == "impossible_initial":
+                    # Handle initial state declarations
+                    if not line_parts:
+                        line_parts.append("initially")
+                    text = "not " + node.text if node.node_type == "impossible_initial" else node.text
+                    if len(line_parts) > 1:
+                        line_parts.append(",")
+                    line_parts.append(text)
+                else:
+                    line_parts.append(node.text)
             
             if line_parts:
                 # Special formatting for query types
@@ -1110,7 +1179,7 @@ class VisualQueryBuilder(QWidget):
                         else:
                             query_parts.append(f"{query_type} {' '.join(remaining_parts)}")
                 else:
-                    # Regular statement (causes, impossible, etc.)
+                    # Regular statement (causes, impossible, initially, etc.)
                     query_parts.append(" ".join(line_parts))
         
         # Join all parts with newlines
@@ -1438,7 +1507,26 @@ class MainWindow(QMainWindow):
             if not parts:
                 continue
                 
-            if parts[0] == "causes" or parts[0] == "impossible":
+            if parts[0] == "initially":
+                # Handle initial state declarations
+                initial_conditions = line[len("initially"):].strip()
+                conditions = [c.strip() for c in initial_conditions.split(",")]
+                
+                for condition in conditions:
+                    condition_type = "initial"
+                    condition_name = condition
+                    
+                    # Check if condition is negated
+                    if condition.startswith("not "):
+                        condition_name = condition[4:]
+                        condition_type = "impossible_initial"
+                    
+                    if condition_name not in nodes:
+                        node = GraphNode(condition_name, condition_type)
+                        scene.addItem(node)
+                        nodes[condition_name] = node
+                
+            elif parts[0] == "causes" or parts[0] == "impossible":
                 # Get action name (parts[1])
                 action_name = parts[1]
                 action_type = "action" if parts[0] == "causes" else "impossible_action"
@@ -2019,11 +2107,13 @@ class MainWindow(QMainWindow):
         self.execute_query()
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    
     # Enable High DPI scaling
-    app.setAttribute(Qt.AA_UseHighDpiPixmaps)
-    app.setAttribute(Qt.AA_EnableHighDpiScaling)
+    if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    
+    app = QApplication(sys.argv)
     
     window = MainWindow()
     window.show()

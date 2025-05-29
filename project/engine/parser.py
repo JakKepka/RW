@@ -44,6 +44,12 @@ class ActionParser:
             delimitedList(self.effect, delim=",")
         )
         
+        # Initial state declaration
+        self.initially_stmt = Group(
+            Literal("initially") +
+            delimitedList(self.effect, delim=",")
+        )
+        
         # Statement types
         self.causes_stmt = Group(
             Literal("causes") +
@@ -67,63 +73,53 @@ class ActionParser:
         self.statement = (
             self.causes_stmt |
             self.impossible_stmt |
-            self.always_stmt
+            self.always_stmt |
+            self.initially_stmt
         )
     
-    def parse_statement(self, text):
-        """Parse a single statement"""
+    def parse_statement(self, text: str) -> dict:
+        """Parse a statement and return a dictionary with its components"""
         try:
-            # Split the line into parts
-            parts = text.split()
-            if not parts:
-                return None
+            result = self.statement.parseString(text, parseAll=True)[0]
             
-            # Handle different statement types
-            if parts[0] == "causes":
-                # Extract action
-                action = parts[1]
-                # Extract effect
-                effect = parts[2]
-                # Extract conditions if present
-                conditions = []
-                if "if" in parts:
-                    if_index = parts.index("if")
-                    conditions = [c.strip() for c in " ".join(parts[if_index + 1:]).split(",")]
-                
-                return {
-                    "type": "causes",
-                    "action": action,
-                    "effect": effect,
-                    "conditions": conditions
-                }
-                
-            elif parts[0] == "impossible":
-                # Extract action
-                action = parts[1]
-                # Extract conditions if present
-                conditions = []
-                if "if" in parts:
-                    if_index = parts.index("if")
-                    conditions = [c.strip() for c in " ".join(parts[if_index + 1:]).split(",")]
-                
-                return {
-                    "type": "impossible",
-                    "action": action,
-                    "conditions": conditions
-                }
-                
-            elif parts[0] == "always":
-                # Extract effect
-                effect = " ".join(parts[1:])
-                return {
-                    "type": "always",
-                    "effect": effect
-                }
+            # Convert parse result to dictionary
+            stmt_dict = {}
             
-            return None
+            if result[0] == "initially":
+                stmt_dict["type"] = "initially"
+                stmt_dict["fluents"] = []
+                for fluent in result[1:]:
+                    if len(fluent) == 2 and fluent[0] == "not":
+                        stmt_dict["fluents"].append(("not", fluent[1]))
+                    else:
+                        stmt_dict["fluents"].append(("pos", fluent[0]))
+                return stmt_dict
             
-        except Exception as e:
-            raise ValueError(f"Error parsing statement: {str(e)}")
+            elif result[0] == "causes":
+                stmt_dict["type"] = "causes"
+                stmt_dict["action"] = result[1]
+                stmt_dict["effect"] = result[2]
+                if len(result) > 3 and result[3][0] == "if":
+                    stmt_dict["conditions"] = result[3][1:]
+                else:
+                    stmt_dict["conditions"] = []
+                    
+            elif result[0] == "impossible":
+                stmt_dict["type"] = "impossible"
+                stmt_dict["action"] = result[1]
+                if len(result) > 2 and result[2][0] == "if":
+                    stmt_dict["conditions"] = result[2][1:]
+                else:
+                    stmt_dict["conditions"] = []
+                    
+            elif result[0] == "always":
+                stmt_dict["type"] = "always"
+                stmt_dict["effect"] = result[1]
+                
+            return stmt_dict
+            
+        except ParseException as e:
+            raise ValueError(f"Invalid statement syntax: {str(e)}")
     
     def parse_query(self, text):
         """Parse a query"""
